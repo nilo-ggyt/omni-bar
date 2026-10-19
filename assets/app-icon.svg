@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Omni Bar">
+  <defs>
+    <linearGradient id="surface" x1="120" y1="80" x2="900" y2="940" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7185c0"/>
+      <stop offset="0.52" stop-color="#39476e"/>
+      <stop offset="1" stop-color="#171c2b"/>
+    </linearGradient>
+  </defs>
+  <rect x="72" y="72" width="880" height="880" rx="220" fill="url(#surface)"/>
+  <rect x="174" y="266" width="676" height="492" rx="116" fill="#10141f" fill-opacity=".92"/>
+  <circle cx="331" cy="512" r="76" fill="none" stroke="#f4f7ff" stroke-width="42"/>
+  <path d="m384 566 98 98" fill="none" stroke="#f4f7ff" stroke-linecap="round" stroke-width="42"/>
+  <path d="M534 435h207M534 512h148M534 589h181" fill="none" stroke="#9eadd9" stroke-linecap="round" stroke-width="34"/>
+</svg>

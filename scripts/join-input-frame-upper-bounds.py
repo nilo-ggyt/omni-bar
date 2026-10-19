@@ -1,0 +1,543 @@
+#!/usr/bin/env python3
+"""离线核对真实 trace v1 与显式提案 fixture；当前没有真实 pixel witness producer。
+
+用法：本脚本 manifest.json --allow-proposal-fixtures。只有 fixture 模式可以计算；
+退出78表示合同/模拟计算成立但实际采集仍未验证，1表示模拟上界未过门槛，65表示证据无效。
+--describe-contract 不读取文件。所有新 witness/manifest 字段均属 proposal v1，不能把它们
+冒充当前 SCK collector 的 schema1 输出。首版只接受单个未标记 ASCII keyDown/insert/accept/
+commit/keyDown-end 的五条真实 serializer 形状；IME、嵌套、多次编辑明确不支持。
+"""
+
+import argparse
+from fractions import Fraction
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import re
+import stat
+import struct
+import sys
+
+U64 = (1 << 64) - 1
+U32 = (1 << 32) - 1
+MAX_TRIALS = 1024
+MAX_TOTAL_BYTES = 64 * 1024 * 1024
+MAX_MANIFEST_BYTES = 2 * 1024 * 1024
+MAX_TRACE_BYTES = 256 * 1024
+MAX_WITNESS_BYTES = 3 * 1024 * 1024
+MAX_LINE_BYTES = 4096
+TRACE_SCHEMA = "omni.native-source-input-trace"
+MANIFEST_SCHEMA = "omni.input-frame-trial-set.proposal"
+WITNESS_SCHEMA = "omni.pixel-witness.proposal"
+REPORT_SCHEMA = "omni.input-frame-upper-bound-report.proposal"
+PROFILE = "single_unmarked_ascii_insert_v1"
+THRESHOLDS = {"p95_ns": "16700000", "p99_ns": "33400000"}
+INVALID, UNVERIFIED = 65, 78
+
+
+class InvalidEvidence(ValueError):
+    """只携带固定错误标签，不传播路径、输入内容或底层异常文本。"""
+
+
+def require(condition, reason):
+    """每项前提独立否决，不修复、补值或丢弃不利记录。"""
+    if not condition:
+        raise InvalidEvidence(reason)
+
+
+def keys(value, names):
+    """字段精确匹配，未知版本/扩展需要显式合同更新。"""
+    require(type(value) is dict and set(value) == set(names.split()), "unsupported_fields")
+
+
+def integer(value, lower=0, upper=U64):
+    """bool 不能冒充计数，所有输入整数均有明确范围。"""
+    require(type(value) is int and lower <= value <= upper, "invalid_integer")
+    return value
+
+
+def decimal(value, lower=0, upper=U64):
+    """宽时钟/身份只接受规范十进制字符串，避免浮点或科学计数修复。"""
+    require(type(value) is str and len(value) <= 20 and
+            re.fullmatch(r"0|[1-9][0-9]*", value) is not None, "invalid_decimal")
+    return integer(int(value), lower, upper)
+
+
+def identifier(value):
+    """报告只保留调用方声明的有限 trial nonce，不接受路径或任意文本。"""
+    require(type(value) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value) is not None,
+            "invalid_identifier")
+    return value
+
+
+def digest(value):
+    """artifact/token 身份必须为完整小写 SHA256，不能用截断前缀关联。"""
+    require(type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None,
+            "invalid_digest")
+    return value
+
+
+def unique_object(pairs):
+    """拒绝重复 key，避免不同解析器取到不同身份或完成事实。"""
+    value = {}
+    for name, item in pairs:
+        # 不能让后来的同名字段覆盖前一个失败/版本声明。
+        require(name not in value, "duplicate_field")
+        value[name] = item
+    return value
+
+
+def decode(raw):
+    """严格 JSON 不接受浮点/NaN；真实 trace 已将宽值编码为字符串。"""
+    try:
+        return json.loads(raw, object_pairs_hook=unique_object,
+                          parse_float=lambda _: require(False, "floating_json"),
+                          parse_constant=lambda _: require(False, "nonfinite_json"))
+    except (UnicodeError, json.JSONDecodeError, RecursionError, ValueError) as error:
+        # 已识别固定标签原样保留，其余解析器异常不输出原始字节。
+        if isinstance(error, InvalidEvidence):
+            raise
+        raise InvalidEvidence("invalid_json") from error
+
+
+def json_lines(raw, maximum_records):
+    """完整 footer 必须连同最后换行存在；行数和每行字节先受限。"""
+    require(raw.endswith(b"\n"), "incomplete_newline")
+    lines = raw.splitlines(keepends=True)
+    require(2 <= len(lines) <= maximum_records, "record_budget")
+    result = []
+    for line in lines:
+        # CRLF、空行和超长记录均不属于真实 newline-only serializer 合同。
+        require(len(line) <= MAX_LINE_BYTES + 1 and line.endswith(b"\n") and
+                not line.endswith(b"\r\n") and line.strip(), "invalid_line")
+        result.append(decode(line))
+    return result
+
+
+def document(value):
+    """只读取真实 serializer 的三个 canonical 计数，不虚构文档内容证明。"""
+    keys(value, "generation utf8_bytes utf16_units")
+    return tuple(decimal(value[field]) for field in ("generation", "utf8_bytes", "utf16_units"))
+
+
+def validate_trace(raw, expected_initial):
+    """核对真实 schema v1，再严格限制为一条同步、无 marked 的 ASCII 提交。"""
+    rows = json_lines(raw, 258)
+    header, footer, records = rows[0], rows[-1], rows[1:-1]
+    keys(header, "schema schema_version kind record_count record_capacity completion_contract clock_domain "
+         "nsevent_clock armed_at_mach_ticks timebase_numer timebase_denom initial_document overflowed "
+         "invalid_scope aborted_scope trace_valid latency_acceptance")
+    keys(footer, "schema schema_version kind export_complete record_count trace_valid latency_acceptance "
+         "footer_durability_certified")
+    require(header["schema"] == footer["schema"] == TRACE_SCHEMA and
+            type(header["schema_version"]) is int and header["schema_version"] == 1 and
+            type(footer["schema_version"]) is int and footer["schema_version"] == 1 and
+            header["kind"] == "header" and footer["kind"] == "complete", "unsupported_trace_schema")
+    require(header["completion_contract"] == "newline_terminated_complete_footer_required" and
+            header["clock_domain"] == "mach_absolute_ticks" and
+            header["nsevent_clock"] == "raw_f64_bits_unconverted", "unsupported_clock")
+    require(all(header[field] is False for field in
+                ("overflowed", "invalid_scope", "aborted_scope", "latency_acceptance")) and
+            header["trace_valid"] is True and footer["trace_valid"] is True and
+            footer["export_complete"] is True and footer["latency_acceptance"] is False and
+            footer["footer_durability_certified"] is False, "invalid_trace_completion")
+    require(integer(header["record_capacity"]) == 256 and
+            integer(header["record_count"], 0, 256) == len(records) ==
+            integer(footer["record_count"], 0, 256), "trace_count_mismatch")
+    initial = document(header["initial_document"])
+    require(initial == document(expected_initial), "initial_document_mismatch")
+    numer = integer(header["timebase_numer"], 1, U32)
+    denom = integer(header["timebase_denom"], 1, U32)
+    armed = decimal(header["armed_at_mach_ticks"], 1)
+    kinds = ["key_down_begin", "selector_begin", "canonical_accepted", "selector_end", "key_down_end"]
+    require(len(records) == len(kinds), "unsupported_input_sequence")
+    previous = armed
+    for index, (record, kind) in enumerate(zip(records, kinds)):
+        # 精确五条 profile 不把异步/嵌套/额外编辑重新指向最后一个事件。
+        keys(record, "kind record_kind serial mach_ticks event_serial selector_serial composition_serial selector "
+             "nsevent_timestamp_bits document removed_utf16_units inserted_utf16_units native_marked outcome "
+             "rejection accepted_count rejected_count")
+        require(record["kind"] == "record" and record["record_kind"] == kind and
+                decimal(record["serial"], 1) == index + 1, "unsupported_input_sequence")
+        ticks = decimal(record["mach_ticks"], 1)
+        require(ticks >= previous, "trace_clock_order")
+        previous = ticks
+        require(decimal(record["event_serial"], 1) == 1 and record["composition_serial"] is None,
+                "unproven_event_causality")
+        scoped = index in (1, 2, 3)
+        require(record["selector_serial"] == ("1" if scoped else None) and
+                record["selector"] == ("insert_text" if scoped else None), "unproven_selector_causality")
+        require(record["native_marked"] is (None if index == 2 else False) and
+                record["rejection"] is None and
+                record["outcome"] == ("committed_changed" if index == 3 else "not_applicable"),
+                "unproven_unmarked_commit")
+        require(integer(record["accepted_count"], 0, U32) == (1 if index == 3 else 0) and
+                integer(record["rejected_count"], 0, U32) == 0, "canonical_count_mismatch")
+        removed = decimal(record["removed_utf16_units"])
+        inserted = decimal(record["inserted_utf16_units"])
+        require((removed in (0, 1) and inserted == 1) if index == 2 else (removed == inserted == 0),
+                "unsupported_ascii_edit")
+        if index == 0:
+            # 原始 NSEvent 秒只验证有限/非负，不换算为 Mach 时间。
+            bits = decimal(record["nsevent_timestamp_bits"])
+            timestamp = struct.unpack(">d", struct.pack(">Q", bits))[0]
+            require(math.isfinite(timestamp) and timestamp >= 0, "invalid_nsevent_bits")
+        else:
+            require(record["nsevent_timestamp_bits"] is None, "invented_event_timestamp")
+        require(document(record["document"]) == (initial if index < 2 else document(records[2]["document"])),
+                "document_changed_outside_commit")
+    after = document(records[2]["document"])
+    delta = 1 - decimal(records[2]["removed_utf16_units"])
+    require(after == (initial[0] + 1, initial[1] + delta, initial[2] + delta) and after[0] <= U64,
+            "canonical_ascii_transition_mismatch")
+    handler, commit = (decimal(records[index]["mach_ticks"], 1) for index in (0, 3))
+    require(armed <= handler < commit, "trace_clock_order")
+    return {"armed": armed, "handler": handler, "commit": commit, "after": after,
+            "numer": numer, "denom": denom, "event_serial": "1", "selector_serial": "1"}
+
+
+def target_identity(value):
+    """trace 没有原生进程身份；这里只核对提案 manifest 与 witness 的明确外部绑定。"""
+    keys(value, "pid uid birth_sec birth_usec boot_epoch_id bundle_id")
+    integer(value["pid"], 2, (1 << 31) - 1)
+    integer(value["uid"], 1, U32)
+    decimal(value["birth_sec"], 1)
+    decimal(value["birth_usec"], 0, 999999)
+    digest(value["boot_epoch_id"])
+    require(type(value["bundle_id"]) is str and len(value["bundle_id"]) <= 255 and
+            re.fullmatch(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+", value["bundle_id"]) is not None,
+            "invalid_bundle_identity")
+    return value
+
+
+def point(value):
+    """几何采用有限规范十进制字符串，分数运算不猜像素取整。"""
+    require(type(value) is str and len(value) <= 16 and
+            re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.[0-9]{1,6})?", value) is not None,
+            "invalid_geometry_decimal")
+    parsed = Fraction(value)
+    require(0 <= parsed <= 16384, "geometry_range")
+    return parsed
+
+
+def rectangle(value):
+    """完整四元矩形不能裁切成另外的有效 ROI。"""
+    require(type(value) is list and len(value) == 4, "invalid_rectangle")
+    result = tuple(point(component) for component in value)
+    require(result[2] > 0 and result[3] > 0, "empty_rectangle")
+    return result
+
+
+def geometry(value):
+    """复核当前 primary-display/native-resolution 合同及首版五份像素峰值。"""
+    keys(value, "display_id display_points filter_points source_roi_points content_points pixel_scale "
+         "content_scale width height mask_enabled")
+    integer(value["display_id"], 1, U32)
+    display, source, content = (rectangle(value[name]) for name in
+                                ("display_points", "source_roi_points", "content_points"))
+    require(display[:2] == (0, 0) and rectangle(value["filter_points"]) == display,
+            "unsupported_display_transform")
+    x, y, width_points, height_points = source
+    require(x + width_points <= display[2] and y + height_points <= display[3] and
+            content == (0, 0, width_points, height_points), "unproven_roi_geometry")
+    scale = point(value["pixel_scale"])
+    width, height = integer(value["width"], 1, 512), integer(value["height"], 1, 128)
+    require(1 <= scale <= 4 and point(value["content_scale"]) == 1 and
+            width_points * scale == width and height_points * scale == height and
+            (x * scale).denominator == (y * scale).denominator == 1 and
+            value["mask_enabled"] is False, "unproven_roi_geometry")
+    require(width * height * 4 * 5 <= 262144, "combined_pixel_budget")
+    return width * height * 4
+
+
+def validate_witness(raw, trial, trace):
+    """只接受明确 fixture 提案；现有真实 collector schema1 与任何 captured 类别都拒绝。"""
+    rows = json_lines(raw, 602)
+    header, footer, frames = rows[0], rows[-1], rows[1:-1]
+    keys(header, "schema schema_version kind evidence_mode producer_implemented actual_capture trial_id run_id "
+         "input_trace_sha256 target initial_document old_token_id new_token_id clock_domain timebase_numer "
+         "timebase_denom start_ticks deadline_ticks required_baseline_frames frame_limit geometry prerequisites "
+         "scope authorization_mode recognition")
+    require(header["schema"] == WITNESS_SCHEMA and type(header["schema_version"]) is int and
+            header["schema_version"] == 1 and header["kind"] == "header", "unsupported_witness_schema")
+    require(header["evidence_mode"] == "fixture_only" and header["producer_implemented"] is False and
+            header["actual_capture"] is False, "capture_producer_unimplemented")
+    require(header["scope"] == "synthetic_app_display_filtered" and header["authorization_mode"] in
+            ("existing_screen_recording", "picker_application_session"), "unsupported_capture_scope")
+    recognition = header["recognition"]
+    keys(recognition, "revision language level language_correction automatic_language_detection preferred_words")
+    require(integer(recognition["revision"]) == 3 and recognition["language"] == "en-US" and
+            recognition["level"] == "accurate" and all(recognition[name] is False for name in
+            ("language_correction", "automatic_language_detection", "preferred_words")),
+            "unsupported_recognition_contract")
+    require(header["trial_id"] == trial["trial_id"] and header["run_id"] == trial["run_id"] and
+            header["input_trace_sha256"] == trial["input_sha256"] and
+            target_identity(header["target"]) == trial["target"] and
+            document(header["initial_document"]) == document(trial["initial_document"]), "witness_identity_mismatch")
+    require(digest(header["old_token_id"]) == trial["old_token_id"] and
+            digest(header["new_token_id"]) == trial["new_token_id"], "token_identity_mismatch")
+    require(header["clock_domain"] == "mach_absolute_ticks" and
+            integer(header["timebase_numer"], 1, U32) == trace["numer"] and
+            integer(header["timebase_denom"], 1, U32) == trace["denom"], "clock_domain_mismatch")
+    keys(header["prerequisites"], "template_source old_calibrated new_calibrated reset_old_verified "
+         "glyphs_complete same_document_and_layout new_state_unique target_scope_verified unlocked unoccluded")
+    prerequisites = header["prerequisites"]
+    require(prerequisites["template_source"] == "fixture_model" and
+            all(value is True for name, value in prerequisites.items() if name != "template_source"),
+            "unproven_capture_prerequisite")
+    pixel_bytes = geometry(header["geometry"])
+    start, deadline = decimal(header["start_ticks"], 1), decimal(header["deadline_ticks"], 1)
+    require(trace["armed"] <= start < deadline and
+            (deadline - start) * trace["numer"] <= 30_000_000_000 * trace["denom"], "invalid_capture_interval")
+    baseline_needed = integer(header["required_baseline_frames"], 1, 10)
+    require(1 <= len(frames) <= integer(header["frame_limit"], 1, 600), "frame_count_mismatch")
+    baseline_count, baseline_ready, baseline_ticks, candidate = 0, False, None, None
+    previous_display = previous_callback = start
+    for index, frame in enumerate(frames, 1):
+        # 每一帧保留原时序/几何/身份；UNKNOWN不能用作absence，也不被静默略去。
+        keys(frame, "kind run_id index display_ticks callback_absolute_ticks state baseline_ready "
+             "earliest_observed_candidate geometry target unoccluded sample_status")
+        require(frame["kind"] == "frame" and frame["run_id"] == trial["run_id"] and
+                integer(frame["index"], 1, 600) == index and frame["sample_status"] == "complete",
+                "frame_identity_order")
+        require(frame["geometry"] == header["geometry"] and frame["target"] == trial["target"] and
+                frame["unoccluded"] is True, "frame_scope_geometry_visibility")
+        geometry(frame["geometry"])
+        target_identity(frame["target"])
+        displayed = decimal(frame["display_ticks"], 1)
+        callback = decimal(frame["callback_absolute_ticks"], 1)
+        require(previous_display < displayed <= callback <= deadline and previous_callback < callback,
+                "frame_clock_order")
+        previous_display, previous_callback = displayed, callback
+        require(frame["state"] in ("old", "new"), "unknown_pixel_state")
+        if not baseline_ready:
+            # NEW在正向baseline之前是预先存在，不能等以后OLD恢复再算。
+            require(frame["state"] == "old", "preexisting_new")
+            baseline_count += 1
+            baseline_ready = baseline_count >= baseline_needed
+            if baseline_ready:
+                # 只锁定首次建立baseline的时钟；输入后的正常OLD等待帧不得覆盖它。
+                baseline_ticks = displayed
+        is_candidate = baseline_ready and frame["state"] == "new" and candidate is None
+        if is_candidate:
+            # 第一候选时钟不能来自输入前/提交前；拒绝后不允许以较晚NEW修补。
+            require(baseline_ticks is not None and baseline_ticks < trace["handler"] and
+                    displayed > trace["commit"], "preexisting_or_precommit_new")
+            candidate = {"run_id": trial["run_id"], "frame_index": index,
+                         "display_ticks": frame["display_ticks"]}
+            candidate_callback = callback
+        require(frame["baseline_ready"] is baseline_ready and
+                frame["earliest_observed_candidate"] is is_candidate, "frame_summary_mismatch")
+    require(candidate is not None, "missing_new_witness")
+    keys(footer, "kind run_id recorded_frames failure witness_valid baseline_ready candidate_present "
+         "earliest_observed audit_binding audit_complete audit_passed audit_loan_released audit_expected_certain "
+         "audit_baseline_seen audit_native_objects_released audit_complete_ticks audit_release_ticks "
+         "cleanup_complete_ticks combined_owned_pixel_peak owned_pixel_bytes_after_drain output_removed "
+         "stop_completed capture_completeness_verified latency_acceptance physical_scanout_verified "
+         "observer_exit_code known_dropped_frames overruns deadline_failed picker_client_released")
+    require(footer["kind"] == "complete" and footer["run_id"] == trial["run_id"] and
+            integer(footer["recorded_frames"], 1, 600) == len(frames), "witness_completion_mismatch")
+    for name in ("earliest_observed", "audit_binding"):
+        # run/index/display ticks三项完整匹配同一个首候选，不能用晚帧审计回填早时间。
+        keys(footer[name], "run_id frame_index display_ticks")
+        require(footer[name] == candidate, "audit_identity_mismatch")
+    true_fields = ("witness_valid", "baseline_ready", "candidate_present", "audit_complete", "audit_passed",
+                   "audit_loan_released", "audit_expected_certain", "audit_native_objects_released",
+                   "output_removed", "stop_completed")
+    false_fields = ("audit_baseline_seen", "capture_completeness_verified", "latency_acceptance",
+                    "physical_scanout_verified", "deadline_failed")
+    require(footer["failure"] == "none" and all(footer[name] is True for name in true_fields) and
+            all(footer[name] is False for name in false_fields) and
+            integer(footer["observer_exit_code"]) == integer(footer["known_dropped_frames"]) ==
+            integer(footer["overruns"]) == 0, "unproven_audit_or_cleanup")
+    require(footer["picker_client_released"] is
+            (True if header["authorization_mode"] == "picker_application_session" else None),
+            "picker_cleanup_unverified")
+    audit, released, cleaned = (decimal(footer[name], 1) for name in
+                               ("audit_complete_ticks", "audit_release_ticks", "cleanup_complete_ticks"))
+    require(candidate_callback <= audit <= released <= deadline and cleaned >= max(released, previous_callback) and
+            (cleaned - deadline) * trace["numer"] <= 3_000_000_000 * trace["denom"], "audit_cleanup_clock_order")
+    require(5 * pixel_bytes <= decimal(footer["combined_owned_pixel_peak"]) <= 262144 and
+            decimal(footer["owned_pixel_bytes_after_drain"]) == 0, "pixel_release_budget")
+    return decimal(candidate["display_ticks"]), candidate["frame_index"]
+
+
+def upper_bound(delta, numer, denom):
+    """整数有理值与ceil共同输出；绝不floor后比较阈值。"""
+    require(0 <= delta <= U64, "negative_or_overflowed_delta")
+    exact = Fraction(delta * numer, denom)
+    return exact, {"numerator": str(exact.numerator), "denominator": str(exact.denominator),
+                   "ceil_ns": str((exact.numerator + exact.denominator - 1) // exact.denominator)}
+
+
+def nearest_rank(values, percent):
+    """同一完整集合按精确分数排序，不插值、不删慢样本。"""
+    require(bool(values) and percent in (95, 99), "invalid_quantile")
+    rank = (len(values) * percent + 99) // 100
+    return sorted(values)[rank - 1], rank
+
+
+class ArtifactReader:
+    """目录fd固定只读权限；文件有限读取并校验读取期间身份不变。"""
+
+    def __init__(self, directory_fd):
+        self.directory_fd = directory_fd
+        self.consumed = 0
+        self.identities = set()
+
+    def read(self, name, maximum):
+        """只接受同一私有目录的普通文件，拒绝路径穿越、symlink、FIFO和别名复用。"""
+        require(type(name) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}", name) is not None and
+                ".." not in name, "invalid_artifact_name")
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+                         dir_fd=self.directory_fd)
+            with os.fdopen(fd, "rb") as stream:
+                before = os.fstat(stream.fileno())
+                identity = (before.st_dev, before.st_ino)
+                require(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid() and
+                        before.st_mode & 0o077 == 0 and 0 < before.st_size <= maximum,
+                        "invalid_artifact_file")
+                require(identity not in self.identities, "artifact_reused")
+                require(self.consumed + before.st_size <= MAX_TOTAL_BYTES, "total_byte_budget")
+                raw = stream.read(maximum + 1)
+                after = os.fstat(stream.fileno())
+                stamp = lambda item: (item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns, item.st_ctime_ns)
+                require(stamp(before) == stamp(after) and len(raw) == before.st_size, "artifact_changed_during_read")
+                self.consumed += len(raw)
+                self.identities.add(identity)
+                return raw, hashlib.sha256(raw).hexdigest()
+        except OSError as error:
+            # 文件系统细节留在原始私有artifact中，不把路径/任意错误文本复制到stdout。
+            raise InvalidEvidence("artifact_io_failure") from error
+
+
+def validate_manifest(value):
+    """先核对完整预声明trial集合，缺失/重复不得在统计时忽略。"""
+    keys(value, "schema schema_version evidence_mode profile endpoint planned_trial_count trial_ids trials thresholds")
+    require(value["schema"] == MANIFEST_SCHEMA and type(value["schema_version"]) is int and
+            value["schema_version"] == 1 and value["evidence_mode"] == "fixture_only" and
+            value["profile"] == PROFILE and value["endpoint"] in ("handler", "commit") and
+            value["thresholds"] == THRESHOLDS, "unsupported_manifest_contract")
+    count = integer(value["planned_trial_count"], 1, MAX_TRIALS)
+    require(type(value["trial_ids"]) is list and type(value["trials"]) is list and
+            len(value["trial_ids"]) == len(value["trials"]) == count, "incomplete_trial_set")
+    ids = [identifier(item) for item in value["trial_ids"]]
+    require(len(set(ids)) == count, "duplicate_trial")
+    names, runs = set(), set()
+    for index, trial in enumerate(value["trials"]):
+        # 文件和run也须独立；同一个观测不能换trial标签重复计权。
+        keys(trial, "trial_id run_id input_file input_sha256 witness_file witness_sha256 target initial_document "
+             "old_token_id new_token_id")
+        require(trial["trial_id"] == ids[index], "trial_order_mismatch")
+        run = decimal(trial["run_id"], 1)
+        require(run not in runs, "duplicate_run")
+        runs.add(run)
+        for name in ("input_file", "witness_file"):
+            require(type(trial[name]) is str and trial[name] not in names, "duplicate_artifact")
+            names.add(trial[name])
+        for name in ("input_sha256", "witness_sha256", "old_token_id", "new_token_id"):
+            digest(trial[name])
+        require(trial["old_token_id"] != trial["new_token_id"], "identical_token_ids")
+        target_identity(trial["target"])
+        document(trial["initial_document"])
+    return value
+
+
+def inspect_manifest(path, allow_proposal_fixtures=False):
+    """无进程/屏幕调用；完整集合任一失败都保留结果且不产生分位通过。"""
+    require(allow_proposal_fixtures is True, "proposal_fixture_requires_opt_in")
+    directory_fd = None
+    try:
+        directory_fd = os.open(Path(path).parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        root = os.fstat(directory_fd)
+        require(root.st_uid == os.getuid() and root.st_mode & 0o077 == 0, "nonprivate_artifact_directory")
+        reader = ArtifactReader(directory_fd)
+        raw, manifest_sha = reader.read(Path(path).name, MAX_MANIFEST_BYTES)
+        manifest = validate_manifest(decode(raw))
+        results, bounds = [], []
+        for trial in manifest["trials"]:
+            # 不在首个坏trial处统计剩余好样本；每个声明ID都有valid/invalid状态。
+            try:
+                trace_raw, trace_sha = reader.read(trial["input_file"], MAX_TRACE_BYTES)
+                require(trace_sha == trial["input_sha256"], "input_digest_mismatch")
+                trace = validate_trace(trace_raw, trial["initial_document"])
+                witness_raw, witness_sha = reader.read(trial["witness_file"], MAX_WITNESS_BYTES)
+                require(witness_sha == trial["witness_sha256"], "witness_digest_mismatch")
+                displayed, frame_index = validate_witness(witness_raw, trial, trace)
+                handler, handler_json = upper_bound(displayed - trace["handler"], trace["numer"], trace["denom"])
+                commit, commit_json = upper_bound(displayed - trace["commit"], trace["numer"], trace["denom"])
+                bounds.append(handler if manifest["endpoint"] == "handler" else commit)
+                results.append({"trial_id": trial["trial_id"], "valid_fixture": True,
+                                "candidate_frame_index": frame_index, "handler_upper_bound_ns": handler_json,
+                                "commit_upper_bound_ns": commit_json})
+            except InvalidEvidence as error:
+                # 失败trial保留，下面整组quantiles=null；不能只聚合bounds中的成功前缀。
+                results.append({"trial_id": trial["trial_id"], "valid_fixture": False, "reason": str(error)})
+        valid = len(bounds) == manifest["planned_trial_count"]
+        report = {"schema": REPORT_SCHEMA, "schema_version": 1, "fixture_only": True,
+                  "producer_implemented": False, "actual_capture_verified": False,
+                  "capture_completeness_verified": False, "physical_scanout_verified": False,
+                  "latency_acceptance": False, "endpoint": manifest["endpoint"],
+                  "endpoint_description": "input_handler_or_commit_to_audited_WindowServer_frame_upper_bound",
+                  "all_declared_trials_valid": valid, "planned_trial_count": manifest["planned_trial_count"],
+                  "trial_results": results, "quantiles": None, "fixture_thresholds_pass": None,
+                  "manifest_sha256": manifest_sha, "source_bytes": reader.consumed}
+        if valid:
+            # 只有全部声明试次成立才计算经验分位；不是未来总体/真实capture或光子结论。
+            quantiles = {}
+            for percent, threshold in ((95, 16700000), (99, 33400000)):
+                exact, rank = nearest_rank(bounds, percent)
+                quantiles[f"p{percent}"] = {"rank": rank, "numerator": str(exact.numerator),
+                                            "denominator": str(exact.denominator),
+                                            "ceil_ns": str((exact.numerator + exact.denominator - 1) // exact.denominator),
+                                            "threshold_ns": str(threshold), "within_threshold": exact <= threshold}
+            report["quantiles"] = quantiles
+            report["fixture_thresholds_pass"] = all(item["within_threshold"] for item in quantiles.values())
+        return report
+    except OSError as error:
+        raise InvalidEvidence("artifact_io_failure") from error
+    finally:
+        # 无论验证/解析在哪一步失败，只结束本脚本打开的目录fd。
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
+def main():
+    """单个JSON报告，不写任何产品/采集文件；合成通过也只退出UNVERIFIED。"""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("manifest", nargs="?")
+    parser.add_argument("--allow-proposal-fixtures", action="store_true")
+    parser.add_argument("--describe-contract", action="store_true")
+    args = parser.parse_args()
+    if args.describe_contract:
+        # 合同查询只列版本/限制，不读取fixture、进程或权限状态。
+        require(args.manifest is None and not args.allow_proposal_fixtures, "conflicting_cli_mode")
+        print(json.dumps({"manifest_schema": MANIFEST_SCHEMA, "witness_schema": WITNESS_SCHEMA,
+                          "schema_version": 1, "real_trace_schema": TRACE_SCHEMA, "profile": PROFILE,
+                          "max_trials": MAX_TRIALS, "max_trace_records": 256, "max_frame_records": 600,
+                          "capture_producer_implemented": False, "capture_modes_accepted": [],
+                          "proposal_fixture_requires_opt_in": True}, sort_keys=True))
+        return 0
+    require(args.manifest is not None, "missing_manifest")
+    report = inspect_manifest(args.manifest, args.allow_proposal_fixtures)
+    print(json.dumps(report, separators=(",", ":"), sort_keys=True))
+    if not report["all_declared_trials_valid"]:
+        return INVALID
+    # 数学fixture的阈值失败仍不等于产品慢；成功也不表示真实性能已通过。
+    return UNVERIFIED if report["fixture_thresholds_pass"] else 1
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except InvalidEvidence as error:
+        print(json.dumps({"schema": REPORT_SCHEMA, "valid": False, "reason": str(error),
+                          "actual_capture_verified": False, "latency_acceptance": False,
+                          "capture_completeness_verified": False, "physical_scanout_verified": False}))
+        sys.exit(INVALID)
+    except (OSError, BrokenPipeError):
+        # 输出断管本身是失败；不再尝试把错误写回已损坏的管道。
+        sys.exit(INVALID)

@@ -1,0 +1,162 @@
+[package]
+name = "omni-native-runtime"
+version = "0.1.0"
+description = "Native AppKit launcher, capability sessions and static plugin composition"
+repository = "https://github.com/nilo-ggyt/omni-bar"
+authors = ["nilo vance"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "omni-native-runtime"
+path = "src/main.rs"
+
+[lib]
+name = "omni_native_runtime"
+path = "src/lib.rs"
+
+[features]
+default = ["native-markdown-runtime"]
+native-markdown-runtime = ["omni-md-plugin/native-markdown-runtime"]
+native-markdown-runtime-probe = ["native-markdown-runtime", "omni-md-plugin/native-markdown-runtime-probe"]
+# Explicit opt-in builds a synthetic-data entry point; distributed product builds omit this adapter.
+native-acceptance = ["native-markdown-runtime"]
+# The product workload opts into the plugin's observation bridge; release builds omit its driver and app subclass.
+native-product-acceptance = ["native-acceptance", "native-markdown-runtime-probe"]
+# Measurement controls exist only in the synthetic fixture and the plugin's separately checked trace build.
+native-input-trace = ["native-acceptance", "omni-md-plugin/native-input-trace", "dep:serde_json"]
+
+[[example]]
+name = "acceptance-fixture"
+path = "examples/acceptance_fixture.rs"
+required-features = ["native-acceptance"]
+
+[[example]]
+name = "launcher_runtime_probe"
+path = "examples/launcher_runtime_probe.rs"
+required-features = ["native-acceptance"]
+
+[[example]]
+name = "product_acceptance"
+path = "examples/product_acceptance.rs"
+required-features = ["native-product-acceptance"]
+
+[[test]]
+name = "builtins_native_runtime"
+path = "tests/builtins_native_runtime.rs"
+harness = false
+
+[[test]]
+name = "markdown_native_surface_runtime"
+path = "tests/markdown_native_surface_runtime.rs"
+harness = false
+required-features = ["native-markdown-runtime-probe"]
+
+[[test]]
+name = "application_termination_runtime"
+path = "tests/application_termination_runtime.rs"
+harness = false
+required-features = ["native-acceptance"]
+
+[dependencies]
+omni-launcher-query = { path = "../launcher-query" }
+# Every plugin is an independent source repository; the immutable revision also pins its own core.
+omni-md-plugin = { git = "https://github.com/nilo-ggyt/omni-md.git", rev = "5aa9134247d025174f6bf285335cbd497b155b1e", version = "=0.1.0" }
+omni-plugin-sdk.workspace = true
+serde_json = { version = "=1.0.151", optional = true }
+crc32fast = "=1.5.0"
+libc = "=0.2.189"
+tempfile = "=3.27.0"
+thiserror = "=2.0.20"
+
+[lints]
+workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Native blocks and dispatch are AppKit adapter dependencies; portable contracts do not initialize them.
+block2 = "=0.6.2"
+dispatch2 = { version = "=0.3.1", default-features = false, features = ["block2", "objc2", "std"] }
+core-foundation = "=0.10.1"
+objc2 = { version = "=0.6.4", default-features = true }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
+  "NSAccessibilityProtocols",
+  "NSAlert",
+  "NSApplication",
+  "NSAppearance",
+  "NSAttributedString",
+  "NSBezierPath",
+  "NSBox",
+  "NSButton",
+  "NSCell",
+  "NSClipView",
+  "NSColor",
+  "NSControl",
+  "NSEvent",
+  "NSFont",
+  "NSFontDescriptor",
+  "NSGraphics",
+  "NSGraphicsContext",
+  "NSMenu",
+  "NSMenuItem",
+  "NSPanel",
+  "NSPasteboard",
+  "NSParagraphStyle",
+  "NSPopUpButton",
+  "NSResponder",
+  "NSRunningApplication",
+  "NSLayoutManager",
+  "NSScrollView",
+  "NSStringDrawing",
+  "NSText",
+  "NSTextContainer",
+  "NSTextContentManager",
+  "NSTextField",
+  "NSTextInputClient",
+  "NSTextInputContext",
+  "NSTextLayoutFragment",
+  "NSTextLayoutManager",
+  "NSTextViewportLayoutController",
+  "NSTextRange",
+  "NSTextStorage",
+  "NSTextTable",
+  "NSTextView",
+  "NSUserInterfaceItemIdentification",
+  "NSView",
+  "NSWindow",
+  "NSWorkspace",
+  "block2",
+  "objc2-core-foundation",
+  "objc2-core-text",
+  "std",
+] }
+objc2-core-foundation = { version = "=0.3.2", default-features = false, features = [
+  "CFRunLoop",
+  "CFString",
+  "block2",
+  "objc2",
+  "std",
+] }
+objc2-core-text = { version = "=0.3.2", default-features = false, features = [
+  "CTFont",
+  "objc2",
+  "std",
+] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = [
+  "NSArray",
+  "NSAttributedString",
+  "NSCharacterSet",
+  "NSDictionary",
+  "NSGeometry",
+  "NSKeyValueObserving",
+  "NSNotification",
+  "NSPathUtilities",
+  "NSRange",
+  "NSString",
+  "NSURL",
+  "NSUndoManager",
+  "NSValue",
+  "std",
+] }
+

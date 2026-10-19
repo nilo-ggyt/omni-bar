@@ -1,0 +1,17 @@
+[package]
+name = "omni-launcher-query"
+version = "0.1.0"
+description = "Allocation-free bounded query matching for the Omni Bar launcher"
+repository = "https://github.com/nilo-ggyt/omni-bar"
+authors = ["nilo vance"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "omni_launcher_query"
+path = "src/lib.rs"
