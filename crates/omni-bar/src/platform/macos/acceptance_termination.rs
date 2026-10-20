@@ -290,7 +290,13 @@ fn request_termination(mtm: MainThreadMarker) {
         }
         Some(NativeTerminationProbeOrigin::MenuAction) => {
             // 显式执行已安装的真实菜单项；没有键盘事件、事件重播或直接coordinator兜底。
-            if let Err(error) = perform_quit_menu_action(mtm) {
+            // 本验收由main GCD主动调用菜单，并非AppKit拥有完整pool边界的鼠标事件。
+            // performAction还会生成高亮/辅助功能通知的Native临时量；正式退出块虽在
+            // action返回后进入Later，却不保证外层事件pool已排空。这里只归还本次
+            // 菜单调用的临时持有，不能把仍存活的业务对象解释为框架缓存或放宽收据。
+            // Result只带纯Rust错误离池；失败处理也在Native临时边全部归还后执行。
+            let result = autoreleasepool(|_| perform_quit_menu_action(mtm));
+            if let Err(error) = result {
                 fail(error, mtm);
             }
         }

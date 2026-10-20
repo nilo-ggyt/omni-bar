@@ -63,7 +63,7 @@ required-features = ["native-acceptance"]
 [dependencies]
 omni-launcher-query = { path = "../launcher-query" }
 # 每个插件来自独立源码仓库；固定不可变提交同时确定该插件自己的Core版本。
-omni-md-plugin = { git = "https://github.com/nilo-ggyt/omni-md.git", rev = "d072c70437ccdad9de267c9750ca74ff27639831", version = "=0.1.0" }
+omni-md-plugin = { git = "https://github.com/nilo-ggyt/omni-md.git", rev = "bedb13a8112c51519736fc6391ceaeac138ecced", version = "=0.1.0" }
 omni-plugin-sdk.workspace = true
 serde_json = { version = "=1.0.151", optional = true }
 crc32fast = "=1.5.0"
