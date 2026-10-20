@@ -26,7 +26,9 @@ pub use platform::macos::acceptance_fixture::{
     release_isolated_acceptance_pasteboard, run_isolated_acceptance_application,
 };
 #[cfg(all(target_os = "macos", feature = "native-product-acceptance"))]
-pub use platform::macos::acceptance_product::run_native_product_acceptance;
+pub use platform::macos::acceptance_product::{
+    run_native_product_acceptance, run_native_product_ime_acceptance,
+};
 #[cfg(all(target_os = "macos", feature = "native-acceptance"))]
 pub use platform::macos::acceptance_termination::{
     NATIVE_TERMINATION_PROBE_INSERTION, NativeTerminationProbeOrigin,

@@ -14,6 +14,11 @@ fn main() -> Result<(), String> {
         }
         let shortcut = arguments.next().ok_or("缺少既有启动器快捷键")?;
         let shortcut = shortcut.to_str().ok_or("启动器快捷键必须使用有效UTF-8")?;
+        let system_ime = match arguments.next().as_deref() {
+            None => false,
+            Some(value) if value == std::ffi::OsStr::new("--system-ime") => true,
+            Some(_) => return Err("只接受已声明的系统中文输入法专项参数".to_owned()),
+        };
         if arguments.next().is_some() {
             return Err("整产品验收不接受其他快捷键或未声明参数".to_owned()); // 不偷偷增加备用唤出键。
         }
@@ -23,7 +28,11 @@ fn main() -> Result<(), String> {
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir()
             .map_err(|_| "无法创建整产品合成验收目录".to_owned())?;
-        omni_native_runtime::run_native_product_acceptance(root.path(), shortcut)
+        if system_ime {
+            omni_native_runtime::run_native_product_ime_acceptance(root.path(), shortcut)
+        } else {
+            omni_native_runtime::run_native_product_acceptance(root.path(), shortcut)
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {

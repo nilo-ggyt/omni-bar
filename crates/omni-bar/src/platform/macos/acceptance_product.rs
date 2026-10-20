@@ -15,9 +15,10 @@ use objc2::{ClassType, MainThreadMarker, MainThreadOnly, define_class, msg_send}
 use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSEventType};
 use objc2_foundation::{NSNotification, NSPoint};
 use omni_md_plugin::{
-    NativeMarkdownHostedFlow, NativeMarkdownHostedResourceCase, NativeMarkdownHostedResourceProbe,
-    NativeMarkdownHostedStep, NativeMarkdownHostedTableCase, NativeMarkdownHostedTableProbe,
-    NativeMarkdownHostedTableStep, NativeMarkdownHostedWorkload,
+    NativeMarkdownHostedFlow, NativeMarkdownHostedImeProbe, NativeMarkdownHostedImeStep,
+    NativeMarkdownHostedResourceCase, NativeMarkdownHostedResourceProbe, NativeMarkdownHostedStep,
+    NativeMarkdownHostedTableCase, NativeMarkdownHostedTableProbe, NativeMarkdownHostedTableStep,
+    NativeMarkdownHostedWorkload,
 };
 use omni_plugin_sdk::{
     PluginCloseIntent, PluginCloseRequest, PluginCloseScope, PluginCommandTarget,
@@ -76,6 +77,7 @@ const TABLE_CASES: [NativeMarkdownHostedTableCase; 8] = [
 enum WorkloadStep {
     Document(NativeMarkdownHostedStep),
     Table(NativeMarkdownHostedTableStep),
+    Ime(NativeMarkdownHostedImeStep),
 }
 
 impl WorkloadStep {
@@ -84,6 +86,7 @@ impl WorkloadStep {
         match self {
             Self::Document(step) => step.closes_surface(),
             Self::Table(_) => false,
+            Self::Ime(_) => false,
         }
     }
 }
@@ -240,6 +243,10 @@ struct Driver {
     verified_table_cases: usize,
     verified_resource_cases: usize,
     first_failure: Option<String>,
+    // 中文系统验收另开全新进程，但仍复用本组合根、窗口、SDK 和唯一应用事件循环。
+    system_ime_only: bool,
+    ime: Option<Rc<NativeMarkdownHostedImeProbe>>,
+    ime_verified: bool,
 }
 
 impl Driver {
@@ -279,11 +286,17 @@ impl Driver {
 
     /// 当前流程只由已完成且释放的文稿数量选择，外来事件不能自行指定工作负载或步骤。
     fn current_flow(&self) -> Option<NativeMarkdownHostedFlow> {
+        if self.system_ime_only {
+            return None;
+        }
         DOCUMENT_FLOWS.get(self.completed_documents).copied()
     }
 
     /// 表格只能在全部文稿流程释放后开始，当前case索引不能由Native回调修改。
     fn current_table_case(&self) -> Option<NativeMarkdownHostedTableCase> {
+        if self.system_ime_only {
+            return None;
+        }
         (self.completed_documents == DOCUMENT_FLOWS.len())
             .then(|| TABLE_CASES.get(self.verified_table_cases).copied())
             .flatten()
@@ -291,6 +304,9 @@ impl Driver {
 
     /// 步骤长度来自插件的单一原表；Host只据此核队列索引与末动作，不复制功能契约。
     fn current_step_count(&self) -> Option<usize> {
+        if self.system_ime_only {
+            return Some(NativeMarkdownHostedImeStep::ALL.len());
+        }
         self.current_flow()
             .map(|flow| flow.steps().len())
             .or_else(|| self.current_table_case().map(|case| case.steps().len()))
@@ -298,6 +314,12 @@ impl Driver {
 
     /// 仅从插件拥有的当前具名步骤表取动作，不转换任意selector或重新发现文稿。
     fn current_step(&self, index: usize) -> Option<WorkloadStep> {
+        if self.system_ime_only {
+            return NativeMarkdownHostedImeStep::ALL
+                .get(index)
+                .copied()
+                .map(WorkloadStep::Ime);
+        }
         if let Some(flow) = self.current_flow() {
             return flow.steps().get(index).copied().map(WorkloadStep::Document);
         }
@@ -633,8 +655,12 @@ fn schedule_hosted_step(index: usize) -> Result<(), String> {
             .begin_step_terminal(index)
     })?;
     // 继承原工作负载的三秒失败期限；只持同一原信号的标量，不保活动作、文稿或Native图。
-    let deadline = dispatch2::DispatchTime::try_from(Duration::from_secs(3))
-        .map_err(|_| "原步骤失败期限无效".to_owned())?;
+    let duration = match step {
+        WorkloadStep::Ime(step) => step.deadline(),
+        _ => Duration::from_secs(3),
+    };
+    let deadline =
+        dispatch2::DispatchTime::try_from(duration).map_err(|_| "原步骤失败期限无效".to_owned())?;
     dispatch2::DispatchQueue::main()
         .after(deadline, move || {
             let current = DRIVER.with_borrow(|slot| {
@@ -653,7 +679,7 @@ fn schedule_hosted_step(index: usize) -> Result<(), String> {
             {
                 bridge.diagnose_deadline(step); // 只读原票有限诊断，不推进执行器或签另一份Ready。
             }
-            fail("原工作负载三秒内没有交付真实终点".to_owned());
+            fail("原工作负载未在所属步骤期限内交付真实终点".to_owned());
         })
         .map_err(|_| "原步骤失败通知无法调度".to_owned())?;
     let terminal = match step {
@@ -662,6 +688,9 @@ fn schedule_hosted_step(index: usize) -> Result<(), String> {
         }
         WorkloadStep::Table(step) => {
             table()?.observe_step_terminal(step, move || hosted_step_terminal(signal))?
+        }
+        WorkloadStep::Ime(step) => {
+            ime()?.observe_step_terminal(step, move || hosted_step_terminal(signal))?
         }
     };
     if terminal {
@@ -709,10 +738,24 @@ fn table() -> Result<Rc<NativeMarkdownHostedTableProbe>, String> {
         .ok_or_else(|| "原表格场景观察桥缺失".to_owned())
 }
 
+/// 只借当前生产会话的中文观察桥；不在 Host 持有输入法、文稿或候选窗口。
+fn ime() -> Result<Rc<NativeMarkdownHostedImeProbe>, String> {
+    DRIVER
+        .with_borrow(|slot| slot.as_ref()?.ime.as_ref().map(Rc::clone))
+        .ok_or_else(|| "原中文输入法观察桥缺失".to_owned())
+}
+
+fn system_ime_only() -> bool {
+    DRIVER.with_borrow(|slot| slot.as_ref().is_some_and(|driver| driver.system_ime_only))
+}
+
 /// 所有长文与源模式流程完成后才选择资源场景，缺少当前场景不能冒充全部通过。
 fn resource_case() -> Option<NativeMarkdownHostedResourceCase> {
     DRIVER.with_borrow(|slot| {
         let driver = slot.as_ref()?;
+        if driver.system_ime_only {
+            return None;
+        }
         (driver.completed_documents == DOCUMENT_FLOWS.len()
             && driver.verified_table_cases == TABLE_CASES.len())
         .then(|| RESOURCE_CASES.get(driver.verified_resource_cases).copied())
@@ -843,6 +886,8 @@ fn request_return() -> Result<(), String> {
     emit("plugin_return_requested");
     if table_case().is_some() {
         table()?.request_return(false)
+    } else if system_ime_only() {
+        ime()?.request_return()
     } else {
         hosted()?.request_return()
     }
@@ -886,9 +931,11 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
             emit("launcher_ready visible=true input_ready=true sdk_session_owned=false");
             let final_close = DRIVER.with_borrow(|slot| {
                 slot.as_ref().is_some_and(|driver| {
-                    (driver.completed_documents == DOCUMENT_FLOWS.len()
-                        && driver.verified_table_cases == TABLE_CASES.len()
-                        && driver.verified_resource_cases == RESOURCE_CASES.len())
+                    (driver.system_ime_only && driver.ime_verified)
+                        || (!driver.system_ime_only
+                            && driver.completed_documents == DOCUMENT_FLOWS.len()
+                            && driver.verified_table_cases == TABLE_CASES.len()
+                            && driver.verified_resource_cases == RESOURCE_CASES.len())
                         || driver.first_failure.is_some()
                 })
             });
@@ -899,7 +946,15 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
             if !foreground_is_empty() {
                 return Err("原 Launcher 未完全释放，禁止插件激活".to_owned());
             }
-            if resource_case().is_some() {
+            if system_ime_only() {
+                let workspace = DRIVER
+                    .with_borrow(|slot| slot.as_ref().map(|driver| driver.root.join("workspace")))
+                    .ok_or("原中文验收目录缺失")?;
+                reset_owned_workspace(&workspace)?;
+                omni_md_plugin::write_native_markdown_ime_fixture(
+                    &workspace.join("Acceptance.md"),
+                )?;
+            } else if resource_case().is_some() {
                 prepare_resource_fixture()?;
             } else if let Some(case) = table_case() {
                 prepare_table_fixture(case)?;
@@ -940,6 +995,23 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
             enqueue(Stage::ObservePlugin)?;
         }
         (Stage::ObservePlugin, Phase::ObservePlugin) => {
+            if system_ime_only() {
+                let path = DRIVER
+                    .with_borrow(|slot| {
+                        slot.as_ref()
+                            .map(|driver| driver.root.join("workspace/Acceptance.md"))
+                    })
+                    .ok_or("原中文合成路径缺失")?;
+                let probe = NativeMarkdownHostedImeProbe::observe_active_document(&path)?;
+                DRIVER.with_borrow_mut(|slot| {
+                    if let Some(driver) = slot.as_mut() {
+                        driver.ime = Some(Rc::new(probe));
+                        driver.phase = Phase::Step(0);
+                    }
+                });
+                schedule_hosted_step(0)?;
+                return Ok(StageOutcome::Completed);
+            }
             if let Some(case) = resource_case() {
                 let path = DRIVER
                     .with_borrow(|slot| {
@@ -1007,6 +1079,7 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
             match step {
                 WorkloadStep::Document(step) => hosted()?.step(step)?,
                 WorkloadStep::Table(step) => table()?.step(step)?,
+                WorkloadStep::Ime(step) => ime()?.step(step)?,
             }
             if index + 1 == steps {
                 DRIVER.with_borrow_mut(|slot| {
@@ -1084,6 +1157,7 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                         && driver.hosted.is_none()
                         && driver.resource.is_none()
                         && driver.table.is_none()
+                        && driver.ime.is_none()
                 })
             });
             if cleanup_without_bridge {
@@ -1102,6 +1176,34 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                 });
                 // 原首帧/身份失败仍是失败；只确认真实 Host 回执，绝不补造 MD 弱证据或场景成功。
                 emit("cleanup_without_observation_bridge host_released=true acceptance=false");
+                resume_launcher_after_release()?;
+                return Ok(StageOutcome::Completed);
+            }
+            if system_ime_only() {
+                let cleanup_only = DRIVER.with_borrow(|slot| {
+                    slot.as_ref()
+                        .is_some_and(|driver| driver.first_failure.is_some())
+                });
+                let verified = ime()?.verify_native_closed();
+                if !cleanup_only {
+                    verified?;
+                }
+                if super::plugin_host::exists()
+                    || super::plugin_host::product_probe_generation().is_some()
+                {
+                    return Err("中文原 Native 已释放但 SDK 会话仍被持有".into());
+                }
+                let old = DRIVER.with_borrow_mut(|slot| {
+                    let driver = slot.as_mut()?;
+                    driver.ime_verified = !cleanup_only && driver.workload_verified;
+                    driver.workload_verified = false;
+                    driver.target = None;
+                    driver.session_generation = None;
+                    driver.phase = Phase::LauncherReady;
+                    driver.ime.take()
+                });
+                drop(old);
+                emit("system_ime_closed sdk_session_dropped=true host_barrier_consumed=true");
                 resume_launcher_after_release()?;
                 return Ok(StageOutcome::Completed);
             }
@@ -1486,9 +1588,11 @@ fn fail(error: String) {
             driver.target,
             driver.resource.as_ref().map(Rc::clone),
             driver.table.as_ref().map(Rc::clone),
+            driver.ime.as_ref().map(Rc::clone),
         ))
     });
-    let Some((phase, bridge, expected_target, resource_bridge, table_bridge)) = first else {
+    let Some((phase, bridge, expected_target, resource_bridge, table_bridge, ime_bridge)) = first
+    else {
         return;
     };
     emit("failed acceptance=false");
@@ -1528,6 +1632,12 @@ fn fail(error: String) {
             && probe.request_return(true).is_ok()
         {
             return; // 只清理本次原表格会话，成功计数不随清理增加。
+        }
+    } else if let Some(probe) = ime_bridge {
+        if begin_plugin_close_observation(PluginCloseIntent::ExitToLauncher).is_ok()
+            && probe.request_return().is_ok()
+        {
+            return;
         }
     } else if let Some(bridge) = bridge {
         let requested = begin_plugin_close_observation(PluginCloseIntent::ExitToLauncher)
@@ -1587,6 +1697,16 @@ fn stop_loop() {
 ///
 /// 非主线程、已有前台、目录非空及Native、步骤、保存、释放错误均明确失败，清理不抹掉首错。
 pub fn run_native_product_acceptance(root: &Path, shortcut: &str) -> Result<(), String> {
+    run_product(root, shortcut, false)
+}
+
+/// 真实中文候选专项仍沿正式组合根运行；不得嵌套事件循环或复用本人正在编辑的输入客户。
+pub fn run_native_product_ime_acceptance(root: &Path, shortcut: &str) -> Result<(), String> {
+    run_product(root, shortcut, true)
+}
+
+/// 两种工作负载共享唯一装配和资源收尾；专项不会减少完整整产品工作负载的任何步骤。
+fn run_product(root: &Path, shortcut: &str, system_ime_only: bool) -> Result<(), String> {
     let configured_shortcut = ShortcutBinding::parse(shortcut)
         .map_err(|_| "整产品验收必须使用明确有效的既有启动器快捷键".to_owned())?;
     MainThreadMarker::new().ok_or("整产品验收需要真实 AppKit 主线程")?;
@@ -1653,11 +1773,20 @@ pub fn run_native_product_acceptance(root: &Path, shortcut: &str) -> Result<(), 
             verified_table_cases: 0,
             verified_resource_cases: 0,
             first_failure: None,
+            system_ime_only,
+            ime: None,
+            ime_verified: false,
         });
     });
-    emit(
-        "configured repeat_cycles_planned=3 document_flows_planned=8 full_steps_per_flow=45 table_cases_planned=8 resource_cases_planned=9 input=programmatic_native_actions editing_verified=false memory_budget_pass=unmeasured",
-    );
+    if system_ime_only {
+        emit(
+            "configured workload=system_ime actual_input_source=true input_source_selected=false physical_keyboard=false memory_budget_pass=unmeasured",
+        );
+    } else {
+        emit(
+            "configured repeat_cycles_planned=3 document_flows_planned=8 full_steps_per_flow=45 table_cases_planned=8 resource_cases_planned=9 input=programmatic_native_actions editing_verified=false memory_budget_pass=unmeasured",
+        );
+    }
     let result = super::run_application();
     // 正式run_application在停止时注销热键；仍独立核验实际空前台和注册已归还，不从代码路径推定释放。
     let released = foreground_is_empty() && super::shortcuts::product_probe_registration_released();
@@ -1667,21 +1796,33 @@ pub fn run_native_product_acceptance(root: &Path, shortcut: &str) -> Result<(), 
     if let Some(error) = state.first_failure {
         return Err(error); // 清理成功不能抹掉此前渲染或Find步骤的真实失败。
     }
+    let workload_passed = if system_ime_only {
+        state.ime_verified
+    } else {
+        state.completed_documents == DOCUMENT_FLOWS.len()
+            && state.verified_editing_flows == CYCLES + 1
+            && state.verified_table_cases == TABLE_CASES.len()
+            && state.verified_resource_cases == RESOURCE_CASES.len()
+    };
     if state.phase != Phase::Finished
-        || state.completed_documents != DOCUMENT_FLOWS.len()
-        || state.verified_editing_flows != CYCLES + 1
-        || state.verified_table_cases != TABLE_CASES.len()
-        || state.verified_resource_cases != RESOURCE_CASES.len()
+        || !workload_passed
         || !released
         || state.hosted.is_some()
         || state.resource.is_some()
         || state.table.is_some()
+        || state.ime.is_some()
         || state.step_terminal.is_some()
     {
         return Err("整产品循环缺失终点、真实前台释放或热键注销证据".to_owned());
     }
-    println!(
-        "product_acceptance event=finished repeat_cycles=3 document_flows=8 full_editing_flows=4 table_cases=8 resource_cases=9 foreground_empty=true sdk_session_owned=false global_key_owner_released=true fixture_cleared=true editing_verified=true memory_budget_pass=unmeasured"
-    );
+    if system_ime_only {
+        println!(
+            "product_acceptance event=system_ime_finished actual_han=true visible_candidate_near_caret=true undo_redo_restore=true saved=true viewport_lazy=true foreground_empty=true sdk_session_owned=false global_key_owner_released=true fixture_cleared=true physical_keyboard=false memory_budget_pass=unmeasured"
+        );
+    } else {
+        println!(
+            "product_acceptance event=finished repeat_cycles=3 document_flows=8 full_editing_flows=4 table_cases=8 resource_cases=9 foreground_empty=true sdk_session_owned=false global_key_owner_released=true fixture_cleared=true editing_verified=true memory_budget_pass=unmeasured"
+        );
+    }
     Ok(())
 }
