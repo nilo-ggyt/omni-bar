@@ -13,8 +13,8 @@ static struct point synthetic_point(uint64_t offset) {
   point.identity.birth_usec = 99;
   point.identity.start_ticks = 12345;
   strcpy(point.identity.executable, "/Synthetic.app/Contents/MacOS/Synthetic");
-  point.current_bytes = 99999999;
-  point.lifetime_peak_bytes = 100000000;
+  point.current_bytes = BUDGET_BYTES - 2;
+  point.lifetime_peak_bytes = BUDGET_BYTES - 1;
   point.before_ticks = 1000000000 + offset;
   point.before_end_ticks = point.before_ticks + 2;
   point.awake_before_ticks = 800000000 + offset;
@@ -94,8 +94,6 @@ static void test_policy(void) {
   }
   changed = next; changed.before_end_ticks = changed.before_ticks - 1;
   expect_failure(changed, &first, 10000000, "clock_order");
-  changed = next; changed.lifetime_peak_bytes = changed.current_bytes - 1;
-  expect_failure(changed, &first, 10000000, "unsupported_peak_counter");
   changed = next; --changed.lifetime_peak_bytes;
   expect_failure(changed, &first, 10000000, "peak_moved_backwards");
   changed = next; changed.awake_before_ticks -= 100; changed.awake_after_ticks -= 100;
@@ -131,10 +129,10 @@ static int emit_fixture(bool over_budget) {
   for (uint64_t index = 0; index < 3; ++index) {
     /* 最后一点下降的 current 与不下降的 lifetime 区分两个计数器的语义。 */
     struct point point = synthetic_point(index * options.interval_ns);
-    point.current_bytes = index == 0 ? 99999999 : (index == 1 ? 100000000 : 50000000);
+    point.current_bytes = index == 0 ? BUDGET_BYTES - 2 : (index == 1 ? BUDGET_BYTES - 1 : 50000000);
     if (over_budget && index == 2) {
-      /* current 仍低于预算时，已知 lifetime 超限也不得输出未超限退出码。 */
-      point.lifetime_peak_bytes = BUDGET_BYTES + 1;
+      /* 恰好达到上限也失败，不能把“低于”误实现为“小于等于”。 */
+      point.lifetime_peak_bytes = BUDGET_BYTES;
     }
     uint64_t elapsed = 0, gap = 0, span = 0, suspension = 0;
     assert(!validate_point(&point, index ? &previous : NULL, &options.expected, midpoint(&first),

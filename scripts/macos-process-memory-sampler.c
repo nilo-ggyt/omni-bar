@@ -23,7 +23,8 @@
 #define MAX_OUTPUT_BYTES (64u * 1024u * 1024u)
 #define MAX_LINE_BYTES 16384u
 #define FOOTER_RESERVE 2048u
-#define BUDGET_BYTES UINT64_C(100000000)
+/* 用户要求整产品峰值严格低于十进制150MB；单进程观测也使用同一严格边界。 */
+#define BUDGET_BYTES UINT64_C(150000000)
 #define NS_PER_MS UINT64_C(1000000)
 #define NS_PER_SECOND UINT64_C(1000000000)
 
@@ -309,8 +310,9 @@ static const char *validate_point(const struct point *point, const struct point 
   /* 所有输出时间须可精确表示为 u64 ns；不能用饱和值掩盖不支持。 */
   if (!delta_ns(origin, midpoint(point), base, elapsed) ||
       !delta_ns(point->before_ticks, point->after_ticks, base, span)) return "clock_conversion";
-  /* 已声明的 peak 也要验证关系，避免不支持字段被解释为已知零峰值。 */
-  if (point->lifetime_peak_bytes < point->current_bytes) return "unsupported_peak_counter";
+  /* XNU先读取lifetime peak，再由fill_task_rusage读取current；两字段并非原子快照。
+   * 查询期间分配可使current暂高于本条peak，不能据此丢弃真实样本或改写任一原值。
+   * 下方仍核同进程peak单调性，最终分别对current与peak执行严格150MB边界。 */
   uint64_t query_uncertainty = (point->before_end_ticks - point->before_ticks) +
                                (point->after_ticks - point->after_begin_ticks);
   /* 检查 query 内休眠；样本间休眠随后使用同域增量独立复核。 */
@@ -378,11 +380,12 @@ static bool write_header(struct writer *writer, const struct options *options,
     "\"birth_sec\":\"%" PRIu64 "\",\"birth_usec\":\"%" PRIu64 "\",\"start_abstime\":\"%" PRIu64 "\","
     "\"executable_hex\":\"%s\",\"origin_continuous_ticks\":\"%" PRIu64 "\","
     "\"duration_ns\":\"%" PRIu64 "\",\"interval_ns\":\"%" PRIu64 "\",\"planned_records\":%" PRIu64 ","
-    "\"timebase_numer\":%u,\"timebase_denom\":%u,\"budget_bytes\":\"100000000\","
+    "\"timebase_numer\":%u,\"timebase_denom\":%u,\"budget_bytes\":\"%" PRIu64 "\","
     "\"api\":\"SDK_declared_libproc_private_subject_to_change\",\"clock\":\"mach_continuous_time\"}\n",
     options->expected.pid, (unsigned)options->expected.uid, options->expected.birth_sec,
     options->expected.birth_usec, options->expected.start_ticks, encoded, origin,
-    options->duration_ns, options->interval_ns, options->planned_records, base->numer, base->denom);
+    options->duration_ns, options->interval_ns, options->planned_records, base->numer, base->denom,
+    BUDGET_BYTES);
 }
 
 /* 所有内存值和 Mach ticks 使用十进制字符串，避免下游二进制浮点丢失整数精度。 */
@@ -432,8 +435,8 @@ static bool write_footer(struct writer *writer, const struct summary *summary, b
     "\"durability_certified\":false}\n",
     complete ? "true" : "false", failure ? failure : "none", summary->records,
     summary->max_current, summary->max_lifetime, summary->max_gap_ns, summary->max_query_ns,
-    complete && summary->max_current <= BUDGET_BYTES ? "true" : "false",
-    complete && summary->max_lifetime <= BUDGET_BYTES ? "true" : "false");
+    complete && summary->max_current < BUDGET_BYTES ? "true" : "false",
+    complete && summary->max_lifetime < BUDGET_BYTES ? "true" : "false");
 }
 
 /* 按绝对 continuous 截止时间等待；休眠/调度迟到仍由采样有效性检查揭示。 */
@@ -573,7 +576,7 @@ int main(int argc, char **argv) {
   /* 任何缺样或语义失败保留非通过状态，不将未见峰值视为低于预算。 */
   if (!complete) return EXIT_INVALID;
   /* 已知 lifetime 超限也保留失败，但不会把其发生时间标成本区间。 */
-  if (summary.max_current > BUDGET_BYTES || summary.max_lifetime > BUDGET_BYTES) return EXIT_BUDGET;
+  if (summary.max_current >= BUDGET_BYTES || summary.max_lifetime >= BUDGET_BYTES) return EXIT_BUDGET;
   /* 单 PID 记录再完整也不能证明 whole-product membership。 */
   return EXIT_MEMBERSHIP_UNVERIFIED;
 }

@@ -8,12 +8,17 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use objc2::rc::{Weak, autoreleasepool};
-use objc2::{MainThreadMarker, msg_send};
+use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::{MainThreadMarker, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationTerminateReply, NSEvent, NSEventModifierFlags, NSEventType,
-    NSTextInputClient, NSTextView, NSWindow,
+    NSApplication, NSApplicationTerminateReply, NSMenuItem, NSTextInputClient, NSWindow,
 };
-use objc2_foundation::{NSNotFound, NSPoint, NSRange, NSString, ns_string};
+use objc2_foundation::{NSNotFound, NSRange, NSString, ns_string};
+use omni_md_plugin::native_surface::paged_text_view::{
+    NativeMarkdownPagedTextView, NativeMarkdownPagedTextViewError,
+};
+
+use crate::capabilities::shortcut_preferences::{ShortcutBinding, ShortcutSettingsStore};
 
 /// Two explicit synthetic scenarios run in separate processes, each with a fresh NSApplication.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -24,11 +29,11 @@ pub enum NativeTerminationProbeScenario {
     MarkdownDirty,
 }
 
-/// Separate ordinary app-local menu delivery from a programmatic quit requested on serial main dispatch.
+/// 显式菜单动作与串行主队列退出各走真实产品入口；均不注册或发送退出快捷键。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeTerminationProbeOrigin {
-    /// AppKit consumes a synthetic Command-Q event through its real application/menu event route.
-    MenuEvent,
+    /// 由原NSMenu公开action入口消费实际退出项，菜单仍拥有原target与selector。
+    MenuAction,
     /// A serial-main-dispatch callback uses the production common-mode termination-entry wrapper.
     Dispatch,
 }
@@ -43,7 +48,9 @@ struct ProbeState {
     directory: PathBuf,
     started: bool,
     window: Option<Weak<NSWindow>>,
-    editor: Option<Weak<NSTextView>>,
+    editor: Option<Weak<NativeMarkdownPagedTextView>>,
+    // 只观察本场景实际调用的原菜单项，不保菜单树、target或任何前台强边。
+    menu_item: Option<Weak<NSMenuItem>>,
     launcher: Option<super::launcher_ui::LauncherReleaseProbe>,
     terminal_receipt: bool,
     accounting: super::native_deallocation::NativeDeallocationAccounting,
@@ -88,6 +95,16 @@ pub fn run_native_termination_probe_child(
     let accounting = super::native_deallocation::verify_native_deallocation_accounting(mtm)?;
     super::native_payload::verify_native_payload_accounting(mtm)?;
     let _pasteboard = super::acceptance_fixture::install_fixture(directory)?;
+    // 四案使用与本轮整产品验收相同、已明确选择的Alt+Space，只写本子进程拥有的隔离配置。
+    // 空配置会尝试默认Cmd+Space；系统拒绝后正式恢复Launcher已占前台，不能再假定插件可直接创建。
+    // 此处不注册第二个键，也不更改用户偏好；实际注册及系统拒绝后的恢复仍只走原启动入口。
+    ShortcutSettingsStore::new(directory.join("application-support"))
+        .persist(ShortcutBinding::OptionSpace)
+        .map_err(|_| {
+            // 尚未发布观察者或启动应用；配置失败先归还本夹具的路径与命名剪贴板权限，保留失败。
+            super::acceptance_fixture::clear_fixture();
+            "无法为隔离退出验收持久化已选启动器快捷键".to_owned()
+        })?;
     PROBE.with_borrow_mut(|slot| {
         // Publish only complete authorities; startup itself remains the production delegate's launch callback.
         *slot = Some(ProbeState {
@@ -97,6 +114,7 @@ pub fn run_native_termination_probe_child(
             started: false,
             window: None,
             editor: None,
+            menu_item: None,
             launcher: None,
             terminal_receipt: false,
             accounting,
@@ -108,7 +126,7 @@ pub fn run_native_termination_probe_child(
     emit("event=configured input=programmatic_responder physical_acceptance=false");
     match origin {
         // Every child declares which actual production entry route the parent must verify.
-        NativeTerminationProbeOrigin::MenuEvent => emit("event=origin value=menu_event"),
+        NativeTerminationProbeOrigin::MenuAction => emit("event=origin value=menu_action"),
         // The dispatch regression specifically requires its original serial block to return before delegate entry.
         NativeTerminationProbeOrigin::Dispatch => emit("event=origin value=dispatch"),
     }
@@ -270,14 +288,11 @@ fn request_termination(mtm: MainThreadMarker) {
             }
             emit("event=dispatch_request_returned");
         }
-        Some(NativeTerminationProbeOrigin::MenuEvent) => {
-            // An app-local event exercises standard Quit routing without a global event tap, TCC or physical-input claim.
-            if let Err(error) = post_quit_menu_event(mtm) {
-                // Missing event construction/window identity stays a failed observation; no direct-call fallback exists.
+        Some(NativeTerminationProbeOrigin::MenuAction) => {
+            // 显式执行已安装的真实菜单项；没有键盘事件、事件重播或直接coordinator兜底。
+            if let Err(error) = perform_quit_menu_action(mtm) {
                 fail(error, mtm);
-                return;
             }
-            emit("event=menu_event_posted");
         }
         None => {
             // The configured owner must survive through its one selected entry; a missing observer cannot pass.
@@ -286,37 +301,42 @@ fn request_termination(mtm: MainThreadMarker) {
     }
 }
 
-/// Post one synthetic Command-Q into this application's event queue, with no system-wide event injection.
-fn post_quit_menu_event(mtm: MainThreadMarker) -> Result<(), String> {
-    let weak = PROBE.with_borrow(|slot| {
-        // Copy a zeroing weak handle before its native upgrade, leaving no observer borrow across AppKit effects.
-        slot.as_ref().and_then(|state| {
-            // A missing observed window remains None and rejects event construction below.
-            state.window.clone()
-        })
-    });
-    let number = weak
-        .and_then(|window| {
-            // Upgrade only long enough to read the window number; no native graph is captured by the event.
-            window.load()
-        })
-        .ok_or("the foreground window disappeared before menu event construction")?
-        .windowNumber();
-    // The window upgrade ends at the statement above; only a scalar native window number enters the event.
-    let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
-        NSEventType::KeyDown,
-        NSPoint::new(0.0, 0.0),
-        NSEventModifierFlags::Command,
-        0.0,
-        number,
-        None,
-        ns_string!("q"),
-        ns_string!("q"),
-        false,
-        12,
-    )
-    .ok_or("AppKit could not construct the app-local synthetic Quit event")?;
-    NSApplication::sharedApplication(mtm).postEvent_atStart(&event, false);
+/// 只执行进程已安装的原退出项；空快捷键与真实action同时通过，不能为了验收另造菜单。
+fn perform_quit_menu_action(mtm: MainThreadMarker) -> Result<(), String> {
+    let application = NSApplication::sharedApplication(mtm);
+    let main = application.mainMenu().ok_or("原应用菜单尚未安装")?;
+    if main.numberOfItems() == 0 {
+        return Err("原应用菜单没有实际条目".into());
+    }
+    let menu = main
+        .itemAtIndex(0)
+        .and_then(|item| item.submenu())
+        .ok_or("原应用退出子菜单缺失")?;
+    let index = menu.indexOfItemWithTitle(ns_string!("退出 Omni Bar"));
+    if index < 0 || index >= menu.numberOfItems() {
+        return Err("原应用退出项不存在".into());
+    }
+    let item = menu.itemAtIndex(index).ok_or("原应用退出项已经移除")?;
+    if item.keyEquivalent().length() != 0
+        || item.action() != Some(sel!(requestOmniTermination:))
+        || item.target().is_none()
+    {
+        return Err("原退出项仍绑定快捷键或不再拥有正式退出action".into());
+    }
+    let weak = Weak::from_retained(&item);
+    PROBE.with_borrow_mut(|slot| {
+        let state = slot.as_mut().ok_or("原菜单退出观察已结束")?;
+        if state.origin != NativeTerminationProbeOrigin::MenuAction || state.menu_item.is_some() {
+            return Err("原菜单退出动作不能重复接纳".to_owned());
+        }
+        state.menu_item = Some(weak);
+        Ok(())
+    })?;
+    emit("event=menu_action_requested key_equivalent_empty=true");
+    // AppKit同步向这个原菜单项的target发送action；原产品包装只排正式退出，必须先返回。
+    // 菜单和item的临时强边在本函数结束归还；它们不持插件、文稿或窗口资源。
+    menu.performActionForItemAtIndex(index);
+    emit("event=menu_action_returned");
     Ok(())
 }
 
@@ -355,35 +375,89 @@ fn prepare_immediate_quit() -> Result<(), String> {
     let editor = window
         .initialFirstResponder()
         .and_then(|responder| {
-            // The actual constructor's initial source responder must be NSTextView, not a system field editor.
-            responder.downcast::<NSTextView>().ok()
+            // 只接实际构造器挂载的分页客户；不接受字段editor，也不保旧TextKit兼容路径。
+            responder.downcast::<NativeMarkdownPagedTextView>().ok()
         })
-        .ok_or("the Markdown initial responder is not a source text view")?;
-    if editor.isFieldEditor() || !window.makeFirstResponder(Some(&editor)) {
-        // A rejected responder transition cannot establish that inserted text reached the active document.
-        return Err("the actual source text view could not become first responder".into());
+        .ok_or("原Markdown初始responder不是正式分页正文")?;
+    let before = editor.input_state().map_err(|cause| cause.to_string())?;
+    if before.marked.is_some()
+        || before.primary_range != NSRange::new(0, 0)
+        || before.selection_range_count != 1
+    {
+        return Err("原分页正文不是预声明的空选区输入前态".into());
     }
-    let source = editor.string();
-    let note = if source.hasPrefix(ns_string!("# Synthetic acceptance note")) {
-        // Directory enumeration may choose either declared fixture note; identify it without a full body copy.
+    if !window.makeFirstResponder(Some(&editor))
+        || !window.firstResponder().is_some_and(|actual| {
+            let expected: &objc2_app_kit::NSResponder = &editor;
+            std::ptr::eq(&*actual, expected)
+        })
+        || editor.input_state().map_err(|cause| cause.to_string())? != before
+    {
+        // Native焦点调用可能重入；原完整Input变化后不能给后来客户补签这次插字。
+        return Err("原分页正文焦点或完整输入已经变化".into());
+    }
+    let client = ProtocolObject::<dyn NSTextInputClient>::from_ref(&*editor);
+    let requested = NSRange::new(0, "# Synthetic acceptance note".len());
+    let mut actual = NSRange::new(NSNotFound as usize, 0);
+    // SAFETY: 原公开协议只读固定ASCII前缀，actual为本栈可写range；两夹具此处均非代理对边界。
+    let prefix =
+        unsafe { client.attributedSubstringForProposedRange_actualRange(requested, &mut actual) }
+            .ok_or("原分页客户没有返回有限夹具前缀")?;
+    if actual != requested || editor.input_state().map_err(|cause| cause.to_string())? != before {
+        return Err("有限夹具前缀并非同一原Input的完整请求范围".into());
+    }
+    let prefix = prefix.string(); // 只取得上面有限协议结果的NSString，不读取整篇正文。
+    let note = if prefix.isEqualToString(ns_string!("# Synthetic acceptance note")) {
+        // 两个预声明文件的枚举顺序不固定；只认固定头部，不能接纳任意用户文稿。
         "Acceptance.md"
-    } else if source.hasPrefix(ns_string!("OmniFrameOldA9\n")) {
-        // The one-MiB workload remains supported without assuming filesystem enumeration order.
+    } else if prefix.hasPrefix(ns_string!("OmniFrameOldA9\n")) {
         "SourcePerformance.md"
     } else {
-        // An unexpected document cannot be mutated or treated as a successful synthetic-data observation.
         return Err("the active document is not one of the declared synthetic fixtures".into());
     };
-    drop(source);
-    editor.setSelectedRange(NSRange::new(0, 0));
+    drop(prefix);
     let insertion = NSString::from_str(NATIVE_TERMINATION_PROBE_INSERTION);
-    // SAFETY: NSTextInputClient's public insertText:replacementRange: accepts NSString. The live
-    // main-thread source responder is retained here; 0..0 is a valid scalar-aligned empty source range.
-    // This opt-in synthetic driver impersonates input delivery and makes no physical-keyboard claim.
-    unsafe { editor.insertText_replacementRange(&insertion, NSRange::new(0, 0)) };
-    if !editor.string().hasPrefix(&insertion) {
-        // Native callback delivery must actually alter the canonical-backed source before Quit can be exercised.
-        return Err("native insertText did not change the source prefix".into());
+    if editor.input_state().map_err(|cause| cause.to_string())? != before {
+        return Err("原退出插字在Native载荷构造期间已失去输入权限".into());
+    }
+    // SAFETY: 同一原分页客户接受NSString及显式0..0替换；只模拟公开输入协议，不冒称真实IME或物理键盘。
+    unsafe { client.insertText_replacementRange(&insertion, NSRange::new(0, 0)) };
+    let after = editor.input_state().map_err(|cause| cause.to_string())?;
+    let inserted_units = NATIVE_TERMINATION_PROBE_INSERTION.len(); // 本预声明前缀严格为ASCII。
+    // 原字符事务也撤旧折叠布局票，空折叠集合的 revision 同样可合法推进；
+    // 此处验证用户实际插字后态，不把内部布局票不变当作保存前置条件。
+    if after.generation
+        != before
+            .generation
+            .checked_add(1)
+            .ok_or("原正文generation耗尽")?
+        || after.utf16_len
+            != before
+                .utf16_len
+                .checked_add(inserted_units)
+                .ok_or("原正文长度溢出")?
+        || after.primary_range != NSRange::new(inserted_units, 0)
+        || after.marked.is_some()
+        || after.selection_range_count != 1
+    {
+        // void 协议回调的真实首错只能从原客户取回；这里只保同一次输入的固定元数据，
+        // 不重放插字、不等待后继状态冒充本次提交，也不读取正文或改变原失败关闭路径。
+        let failure = editor.take_failure();
+        return Err(format!(
+            "原分页插字未形成准确一次预声明后态 before={before:?} after={after:?} view_failure={failure:?}"
+        ));
+    }
+    let requested = NSRange::new(0, inserted_units);
+    let mut actual = NSRange::new(NSNotFound as usize, 0);
+    // SAFETY: 仍只读原客户的固定新增ASCII片段，绝不借.string()物化整篇原文。
+    let prefix =
+        unsafe { client.attributedSubstringForProposedRange_actualRange(requested, &mut actual) }
+            .ok_or("原分页插字没有返回有限实际前缀")?;
+    if actual != requested
+        || !prefix.string().isEqualToString(&insertion)
+        || editor.input_state().map_err(|cause| cause.to_string())? != after
+    {
+        return Err("原分页输入未改变精确源前缀或后态已撤销".into());
     }
     // Inspect only fixed-prefix scratch; even the one-MiB fixture needs no second document-sized body mirror.
     let mut disk = [0_u8; NATIVE_TERMINATION_PROBE_INSERTION.len()];
@@ -397,11 +471,11 @@ fn prepare_immediate_quit() -> Result<(), String> {
         // Already persisted input would fail to exercise save-before-close, so it cannot satisfy this scenario.
         return Err("synthetic draft was already saved before the immediate Quit request".into());
     }
+    let weak = Weak::from_retained(&editor);
     PROBE.with_borrow_mut(|slot| {
-        // Keep only the actual editor's zeroing weak identity for the final native-release assertion.
+        // 只保原客户的零化弱身份；所有前缀、Native协议结果与强view均随本次输入池归还。
         if let Some(state) = slot.as_mut() {
-            // Verification may upgrade it once later, but the observer never retains the text view between callbacks.
-            state.editor = Some(Weak::from_retained(&editor));
+            state.editor = Some(weak);
         }
     });
     emit(&format!(
@@ -415,29 +489,23 @@ fn has_menu_probe() -> bool {
     PROBE.with_borrow(|slot| {
         // Scalar origin retains no menu, sender or foreground graph and holds no borrow across native calls.
         slot.as_ref()
-            .is_some_and(|state| state.origin == NativeTerminationProbeOrigin::MenuEvent)
+            .is_some_and(|state| state.origin == NativeTerminationProbeOrigin::MenuAction)
     })
 }
 
-/// Verify that the actual menu action is driven by the parent observer's Command-Q event.
-pub(super) fn record_menu_action() {
+/// 实际action必须收到原NSMenu所持的同一菜单项；没有NSEvent也不会伪造按键来源。
+pub(super) fn record_menu_action(sender: Option<&AnyObject>) {
     if !has_menu_probe() {
         // Unconfigured manual menu actions are outside this synthetic observation; neither log nor query currentEvent.
         return;
     }
-    let mtm = MainThreadMarker::new().expect("menu actions use the AppKit thread");
-    let delivered = NSApplication::sharedApplication(mtm)
-        .currentEvent()
-        .is_some_and(|event| {
-            // Require the original app-local event; a later direct quit-selector call cannot impersonate menu delivery.
-            event.r#type() == NSEventType::KeyDown
-                && event.keyCode() == 12
-                && event
-                    .modifierFlags()
-                    .contains(NSEventModifierFlags::Command)
-        });
+    let item = PROBE.with_borrow(|slot| slot.as_ref().and_then(|state| state.menu_item.clone()));
+    let delivered = item.and_then(|item| item.load()).is_some_and(|item| {
+        let expected: &AnyObject = &item;
+        sender.is_some_and(|sender| std::ptr::eq(expected, sender))
+    });
     emit(&format!(
-        "event=menu_action current_event_matches={delivered}"
+        "event=menu_action original_item_matches={delivered}"
     ));
 }
 
@@ -451,36 +519,19 @@ pub(super) fn record_menu_request_returned() {
 
 /// Record the actual production delegate's selected response without invoking or changing its close decision.
 pub(super) fn record_delegate_reply(reply: NSApplicationTerminateReply) {
-    let origin = PROBE.with_borrow_mut(|slot| {
+    let installed = PROBE.with_borrow_mut(|slot| {
         let Some(state) = slot.as_mut() else {
             // Production/manual acceptance has no diagnostic observer or additional work.
-            return None;
+            return false;
         };
         if reply == NSApplicationTerminateReply::TerminateLater {
             // Count real Later obligations so the parent rejects duplicate or missing async completion.
             state.later_replies = state.later_replies.saturating_add(1);
         }
-        Some(state.origin)
+        true
     });
-    if let Some(origin) = origin {
-        if origin == NativeTerminationProbeOrigin::MenuEvent {
-            // Observe the native event being dispatched when the standard menu actually enters its delegate.
-            let mtm =
-                MainThreadMarker::new().expect("the application delegate uses the AppKit thread");
-            let delivered = NSApplication::sharedApplication(mtm)
-                .currentEvent()
-                .is_some_and(|event| {
-                    // Only this exact app-local key-down qualifies; a guessed direct selector call cannot satisfy it.
-                    event.r#type() == NSEventType::KeyDown
-                        && event.keyCode() == 12
-                        && event
-                            .modifierFlags()
-                            .contains(NSEventModifierFlags::Command)
-                });
-            emit(&format!(
-                "event=menu_delivery current_event_matches={delivered}"
-            ));
-        }
+    if installed {
+        // 两个真实入口从这里起共用同一退出事务，不借后继currentEvent补造原动作来源。
         // Unknown native replies cannot be disguised as a successful Later transaction.
         let value = if reply == NSApplicationTerminateReply::TerminateLater {
             // The actual modal wait must be followed by the existing strict release-authorized async reply.
@@ -526,31 +577,34 @@ pub(super) fn record_terminal_release() {
     });
 }
 
-/// Independently inspect the edited text identity; the complete SDK receipt still proves private capacity/TextKit cleanup.
-fn observe_terminated_editor(editor: &Weak<NSTextView>) -> (bool, &'static str) {
+/// 独立观察原分页客户是否实际封闭；完整SDK收据另证Doc、Source、字体与worker等全部资源归还。
+fn observe_terminated_editor(editor: &Weak<NativeMarkdownPagedTextView>) -> (bool, &'static str) {
     let Some(editor) = editor.load() else {
         // The original weak identity ended; a new or replacement control cannot substitute for this observation.
         return (true, "nil");
     };
-    // Query existing text's public state only, avoiding potentially creating layoutManager/undoManager getters.
-    // Inspect no plugin-private fields and waive no class; the complete terminal receipt separately proves its sealed type.
-    let selection = editor.selectedRange();
+    let client = ProtocolObject::<dyn NSTextInputClient>::from_ref(&*editor);
+    let selection = client.selectedRange();
     let selection_empty = selection.length == 0
         && (selection.location == 0 || selection.location == NSNotFound as usize);
-    // SAFETY: A main-thread Weak upgrade protects the captured NSTextView; the three public getters take no arguments
-    // and return borrowed object pointers compared with nil, without retaining/dereferencing or recreating ended parent owners.
+    // SAFETY: 原弱身份只在本池升级；三个公开NSView/NSResponder getter只比较nil，不能重建正文或输入owner。
     let links_detached = unsafe {
         let window: *mut objc2::runtime::AnyObject = msg_send![&*editor, window];
         let parent: *mut objc2::runtime::AnyObject = msg_send![&*editor, superview];
         let responder: *mut objc2::runtime::AnyObject = msg_send![&*editor, nextResponder];
         window.is_null() && parent.is_null() && responder.is_null()
     };
-    let inert = !editor.isEditable()
-        && !editor.isSelectable()
-        && !editor.allowsUndo()
-        && editor.delegate().is_none()
-        && editor.string().length() == 0
-        && !editor.hasMarkedText()
+    // Revoked只说明前台失权，不能冒充实际close；必须是公开Closed错误，且真实CPU拥有槽已归还。
+    // inputContext在Closed时只返回None，不创建新上下文；不再借TextKit.string()/layout/undo检查旧图。
+    let inert = matches!(
+        editor.input_state(),
+        Err(NativeMarkdownPagedTextViewError::Closed)
+    ) && !editor.session_is_current()
+        && editor.pixel_observer().is_none()
+        && editor.cpu_layer_weaks().is_none()
+        && editor.cpu_paints().is_none()
+        && editor.inputContext().is_none()
+        && !client.hasMarkedText()
         && selection_empty
         && links_detached;
     if inert {

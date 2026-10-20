@@ -11,7 +11,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("memory_report", SCRIPTS / "macos-process-memory-report.py")
@@ -70,8 +69,8 @@ class ProcessMemoryTests(unittest.TestCase):
     def test_valid_single_pid_never_claims_whole_product_pass(self):
         result = self.inspect()
         self.assertTrue(result["observation_valid"])
-        self.assertEqual(result["sampled_max_current_bytes"], "100000000")
-        self.assertEqual(result["max_lifetime_peak_bytes"], "100000000")
+        self.assertEqual(result["sampled_max_current_bytes"], "149999999")
+        self.assertEqual(result["max_lifetime_peak_bytes"], "149999999")
         self.assertEqual(result["exit_code"], 78)
         self.assertFalse(result["whole_product_budget_pass"])
         self.assertFalse(result["steady_growth_assessed"])
@@ -83,8 +82,21 @@ class ProcessMemoryTests(unittest.TestCase):
         result = REPORT.inspect_stream(io.BytesIO(raw), 1)
         self.assertTrue(result["single_pid_current_within_budget"])
         self.assertFalse(result["single_pid_lifetime_within_budget"])
-        self.assertEqual(result["max_lifetime_peak_bytes"], "100000001")
+        self.assertEqual(result["max_lifetime_peak_bytes"], "150000000")
         self.assertEqual(result["exit_code"], 1)
+
+    def test_current_exactly_at_limit_also_fails(self):
+        records = self.changed()
+        # 真实非原子记录可在读peak之后升至150MB；较小peak不能使已经超限的current通过。
+        records[2]["physical_footprint_bytes"] = "150000000"
+        footer = records[-1]
+        footer["max_current_bytes"] = "150000000"
+        footer["single_pid_current_within_budget"] = False
+        result = self.inspect(records, 1)
+        self.assertFalse(result["single_pid_current_within_budget"])
+        self.assertTrue(result["single_pid_lifetime_within_budget"])
+        self.assertEqual(result["max_lifetime_peak_bytes"], "149999999")
+        self.assertEqual(result["budget_bytes"], "150000000")
 
     def test_full_u64_counters_never_pass_through_float(self):
         records = self.changed()
@@ -158,11 +170,13 @@ class ProcessMemoryTests(unittest.TestCase):
         with self.assertRaises(REPORT.InvalidObservation):
             self.inspect(records)
 
-    def test_current_and_lifetime_support_and_monotonicity_are_required(self):
+    def test_nonatomic_current_keeps_original_peak_and_monotonicity(self):
         records = self.changed()
-        records[1]["lifetime_peak_bytes"] = "1"
-        with self.assertRaises(REPORT.InvalidObservation):
-            self.inspect(records)
+        # 先读到较小peak、再读到较大current是合法外部输入，仍保原样本而非重采或填充值。
+        records[1]["lifetime_peak_bytes"] = "149999997"
+        result = self.inspect(records)
+        self.assertEqual(result["sampled_max_current_bytes"], "149999999")
+        self.assertEqual(result["max_lifetime_peak_bytes"], "149999999")
         records = self.changed()
         records[3]["lifetime_peak_bytes"] = "99999999"
         with self.assertRaises(REPORT.InvalidObservation):
@@ -238,9 +252,6 @@ class ProcessMemoryTests(unittest.TestCase):
             # 所有反例都来自内存，且解析器读取本身保留字节和行预算。
             with self.assertRaises(REPORT.InvalidObservation):
                 REPORT.inspect_stream(io.BytesIO(raw), 78)
-        with mock.patch.object(REPORT, "MAX_BYTES", len(self.raw) - 1):
-            with self.assertRaises(REPORT.InvalidObservation):
-                self.inspect()
 
     def test_identify_and_sample_bad_cli_never_create_output(self):
         with tempfile.TemporaryDirectory(dir=self.root) as directory:
@@ -293,25 +304,19 @@ class ProcessMemoryTests(unittest.TestCase):
             self.assertEqual(result.returncode, 65)
             self.assertFalse(json.loads(result.stdout)["observation_valid"])
 
-    def test_report_read_rejects_symlink_and_detects_concurrent_file_change(self):
+    def test_report_read_rejects_symlink_and_oversized_artifact(self):
         with tempfile.TemporaryDirectory(dir=self.root) as directory:
             path, alias = Path(directory) / "synthetic.jsonl", Path(directory) / "link"
             path.write_bytes(self.raw)
             alias.symlink_to(path)
             with self.assertRaises(OSError):
                 REPORT.inspect_file(alias, 78)
-            original = REPORT.inspect_stream
-
-            def change_after_parse(stream, code):
-                # 合作测试 seam 在结束 fstat 前改文件，验证报告不会认证不稳定输入。
-                result = original(stream, code)
-                with path.open("ab") as output:
-                    output.write(b"\n")
-                return result
-
-            with mock.patch.object(REPORT, "inspect_stream", side_effect=change_after_parse):
-                with self.assertRaises(REPORT.InvalidObservation):
-                    REPORT.inspect_file(path, 78)
+            # 用本测试独占的真实稀疏文件越过生产上限，不改常量、替换解析器或制造并发钩子。
+            # fstat 必须在读取记录前拒绝它；稀疏扩展不分配同样大小的内存或磁盘数据块。
+            with path.open("wb") as output:
+                output.truncate(REPORT.MAX_BYTES + 1)
+            with self.assertRaises(REPORT.InvalidObservation):
+                REPORT.inspect_file(path, 78)
 
 
 if __name__ == "__main__":

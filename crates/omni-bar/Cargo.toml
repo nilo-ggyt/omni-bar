@@ -21,11 +21,11 @@ path = "src/lib.rs"
 default = ["native-markdown-runtime"]
 native-markdown-runtime = ["omni-md-plugin/native-markdown-runtime"]
 native-markdown-runtime-probe = ["native-markdown-runtime", "omni-md-plugin/native-markdown-runtime-probe"]
-# Explicit opt-in builds a synthetic-data entry point; distributed product builds omit this adapter.
+# 仅显式启用时编译合成数据验收入口；正式分发构建不包含该适配器。
 native-acceptance = ["native-markdown-runtime"]
-# The product workload opts into the plugin's observation bridge; release builds omit its driver and app subclass.
-native-product-acceptance = ["native-acceptance", "native-markdown-runtime-probe"]
-# Measurement controls exist only in the synthetic fixture and the plugin's separately checked trace build.
+# 整产品工作负载显式启用插件观察桥；正式分发构建不包含验收driver和应用子类。
+native-product-acceptance = ["native-acceptance", "native-markdown-runtime-probe", "omni-md-plugin/native-table-row-append"]
+# 测量控制只存在于合成夹具及插件单独核验的输入追踪构建，不进入默认产品。
 native-input-trace = ["native-acceptance", "omni-md-plugin/native-input-trace", "dep:serde_json"]
 
 [[example]]
@@ -62,8 +62,8 @@ required-features = ["native-acceptance"]
 
 [dependencies]
 omni-launcher-query = { path = "../launcher-query" }
-# Every plugin is an independent source repository; the immutable revision also pins its own core.
-omni-md-plugin = { git = "https://github.com/nilo-ggyt/omni-md.git", rev = "5aa9134247d025174f6bf285335cbd497b155b1e", version = "=0.1.0" }
+# 每个插件来自独立源码仓库；固定不可变提交同时确定该插件自己的Core版本。
+omni-md-plugin = { git = "https://github.com/nilo-ggyt/omni-md.git", rev = "d072c70437ccdad9de267c9750ca74ff27639831", version = "=0.1.0" }
 omni-plugin-sdk.workspace = true
 serde_json = { version = "=1.0.151", optional = true }
 crc32fast = "=1.5.0"
@@ -75,7 +75,7 @@ thiserror = "=2.0.20"
 workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# Native blocks and dispatch are AppKit adapter dependencies; portable contracts do not initialize them.
+# Native blocks和dispatch仅属AppKit适配层依赖；可移植契约不负责初始化这些原生设施。
 block2 = "=0.6.2"
 dispatch2 = { version = "=0.3.1", default-features = false, features = ["block2", "objc2", "std"] }
 core-foundation = "=0.10.1"

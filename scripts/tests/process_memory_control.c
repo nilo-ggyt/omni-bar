@@ -107,9 +107,9 @@ int main(void) {
     if (!strcmp(command, "ALLOC32")) {
       /* 32MiB 是明确触页负载，实际 footprint 增量由 OS 测量，不硬断言相等。 */
       if (!allocate_and_touch(&allocation, 32 * MIB) || !acknowledge("allocated32", &allocation)) break;
-    } else if (!strcmp(command, "ALLOC128")) {
-      /* 可选的 128MiB 阶段用来验证十进制 100MB 超限，仍有固定分配上界。 */
-      if (!allocate_and_touch(&allocation, 128 * MIB) || !acknowledge("allocated128", &allocation)) break;
+    } else if (!strcmp(command, "ALLOC192")) {
+      /* 可选192MiB阶段明确越过150MB新上限，释放后仍须保留实际历史峰值。 */
+      if (!allocate_and_touch(&allocation, 192 * MIB) || !acknowledge("allocated192", &allocation)) break;
     } else if (!strcmp(command, "FREE")) {
       /* ack 只在 munmap 成功后发布；lifetime peak 不会因此被重置。 */
       if (!release_allocation(&allocation) || !acknowledge("freed", &allocation)) break;

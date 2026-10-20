@@ -1,6 +1,6 @@
-//! A dedicated process-menu target schedules app Quit; the current responder still handles editing actions.
+//! 进程菜单独立调度显式退出；编辑动作仍交给当前原生响应者。
 //!
-//! Menus retain no plugin/document identity; an explicit quit target avoids foreground resolution stacks during TerminateLater.
+//! 菜单不持有插件或文档；明确的退出目标避免异步退出时临时保活前台响应链。
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
@@ -9,31 +9,33 @@ use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
 use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
 
 define_class!(
-    /// The process menu owns a payload-free target so the termination wait does not borrow foreground responders/controllers.
-    // SAFETY: This NSObject subclass adds no ivars and preserves the single-argument action ABI and main-thread constraints.
+    /// 菜单拥有不含业务载荷的目标，退出等待期间不借用前台响应者或控制器。
+    // SAFETY: 子类不新增实例字段，保持单参数 action 的 ABI 和主线程约束。
     #[unsafe(super = NSObject)]
     #[thread_kind = MainThreadOnly]
     struct QuitMenuTarget;
 
-    // SAFETY: Preserve initialized NSObject identity without overriding memory management or threading behavior.
+    // SAFETY: 沿用已初始化的 NSObject 身份，不覆盖内存管理或线程行为。
     unsafe impl NSObjectProtocol for QuitMenuTarget {}
 
     impl QuitMenuTarget {
         #[unsafe(method(requestOmniTermination:))]
-        /// Reserve quit once; enter the standard terminate:/delegate protocol only after the menu action returns.
-        fn request_termination(&self, _sender: Option<&AnyObject>) {
+        /// 只预约一次退出；菜单 action 返回后才进入原生 terminate:/delegate 协议。
+        fn request_termination(&self, sender: Option<&AnyObject>) {
             #[cfg(feature = "native-acceptance")]
             {
-                // Actual menu-action evidence is independent of the later delegate's currentEvent query.
-                super::acceptance_termination::record_menu_action();
+                // 验收只认原菜单项的真实action，不合成用户明确拒绝的退出快捷键。
+                super::acceptance_termination::record_menu_action(sender);
             }
+            #[cfg(not(feature = "native-acceptance"))]
+            let _ = sender;
             if let Err(error) = super::termination::request_application_termination() {
-                // Entry failure preserves the foreground without substituting direct terminate or forced exit.
+                // 调度失败保留当前前台，避免跳过保存事务直接终止进程。
                 eprintln!("menu termination could not be scheduled: {error}");
             }
             #[cfg(feature = "native-acceptance")]
             {
-                // The parent requires this scalar before delegate reply, exposing any wait reintroduced on the menu-action stack.
+                // 父进程要求此标量先于 delegate 回复，以发现菜单 action 栈内重新引入的等待。
                 super::acceptance_termination::record_menu_request_returned();
             }
         }
@@ -41,15 +43,15 @@ define_class!(
 );
 
 impl QuitMenuTarget {
-    /// Create a payload-free main-thread action target, owned by menu scope until the previous menu is restored.
+    /// 主线程创建无业务载荷的 action 目标，由菜单作用域持有至原菜单恢复。
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let allocated = Self::alloc(mtm).set_ivars(());
-        // SAFETY: Unit ivars are initialized; NSObject.init consumes the +1 allocation and returns the same main-thread type.
+        // SAFETY: 单元实例字段已初始化；NSObject.init 消费 +1 分配并返回同一主线程类型。
         unsafe { msg_send![super(allocated), init] }
     }
 }
 
-/// Restore the previous application menu if initialization fails or the run loop is explicitly stopped.
+/// 初始化失败或事件循环显式停止时，恢复此前的应用菜单。
 pub(super) struct ApplicationMenuScope<'a> {
     application: &'a NSApplication,
     previous: Option<Retained<NSMenu>>,
@@ -57,11 +59,11 @@ pub(super) struct ApplicationMenuScope<'a> {
 }
 
 impl<'a> ApplicationMenuScope<'a> {
-    /// Install a minimal standard menu before the product run loop accepts keyboard events.
+    /// 在产品事件循环接收按键前安装所需原生菜单。
     pub(super) fn install(application: &'a NSApplication, mtm: MainThreadMarker) -> Self {
-        // Keep the prior process menu restorable without retaining any foreground owner.
+        // 只保留原进程菜单，恢复过程不需要持有任何前台业务对象。
         let previous = application.mainMenu();
-        // This target belongs to the process menu only and reuses no foreground/window delegate.
+        // 退出目标只归进程菜单所有，与窗口 delegate 的资源生命周期分开。
         let quit_target = QuitMenuTarget::new(mtm);
         let main = NSMenu::new(mtm);
         let application_menu =
@@ -74,16 +76,17 @@ impl<'a> ApplicationMenuScope<'a> {
             &application_menu,
             "退出 Omni Bar",
             sel!(requestOmniTermination:),
-            "q",
+            // 退出仍由显式菜单动作进入原事务；不注册Cmd+Q，也不选择任何替代按键。
+            "",
             false,
             mtm,
         );
-        // App-menu Quit uses a separate target; it is neither a system hotkey nor the plugin Back action.
-        // An explicit target avoids nil-target resolution through the input responder chain and its temporary foreground claims.
-        // SAFETY: Scope retains the main-thread target and releases it only after Drop restores the old menu.
+        // 原菜单退出与插件返回各有实际意图；没有按键不影响保存、释放和异步退出顺序。
+        // 显式目标避免 nil target 沿输入响应链查找时临时保活插件窗口。
+        // SAFETY: 作用域持有该主线程目标，Drop 恢复原菜单后才释放它。
         unsafe { quit.setTarget(Some(&*quit_target)) };
 
-        // Localized menus retain standard selectors/keys; current native fields or document history handle editing.
+        // 中文菜单沿用已有编辑 selector 和按键，由当前原生输入框或文档历史处理。
         let edit = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("编辑"));
         let edit_item = NSMenuItem::new(mtm);
         edit_item.setTitle(&NSString::from_str("编辑"));
@@ -97,10 +100,10 @@ impl<'a> ApplicationMenuScope<'a> {
             ("粘贴", sel!(paste:), "v", false),
             ("全选", sel!(selectAll:), "a", false),
         ] {
-            // A finite static menu registers ordinary responder actions, with no alternate editor state or cache.
+            // 固定菜单只注册响应者动作，文档状态和撤销历史仍归实际编辑器所有。
             add_action(&edit, title, selector, key, shift, mtm);
         }
-        // NSApplication retains the menu tree; local retained construction claims may end after publication.
+        // NSApplication 接管菜单树；发布后即可归还本次构造的局部强引用。
         application.setMainMenu(Some(&main));
         Self {
             application,
@@ -110,7 +113,7 @@ impl<'a> ApplicationMenuScope<'a> {
     }
 }
 
-/// Build responder-chain menu items by default; callers may install explicit targets for app-wide actions.
+/// 默认创建响应链菜单项；进程级动作由调用方设置明确的目标对象。
 fn add_action(
     menu: &NSMenu,
     title: &str,
@@ -119,8 +122,8 @@ fn add_action(
     shift: bool,
     mtm: MainThreadMarker,
 ) -> Retained<NSMenuItem> {
-    // SAFETY: Callers supply declared project/AppKit single-object action selectors matching NSMenuItem's ABI.
-    // Initial nil targets use the responder chain; app Quit then installs its scope-owned explicit target.
+    // SAFETY: 调用方仅传入已声明且符合 NSMenuItem 单对象 action ABI 的 selector。
+    // 初始 nil target 交给响应链；退出项随后绑定菜单作用域拥有的目标。
     let item = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
@@ -130,21 +133,21 @@ fn add_action(
         )
     };
     let modifiers = if shift {
-        // Standard Redo is Command-Shift-Z; Shift remains explicit rather than relying on an uppercase key alias.
+        // 重做保留原 Command-Shift-Z，显式声明 Shift，避免依赖大写字母别名。
         NSEventModifierFlags::Command | NSEventModifierFlags::Shift
     } else {
-        // All other declared actions use their standard exact Command-letter equivalent.
+        // 其他已有编辑动作使用其明确的 Command 组合；空键退出项不会注册按键。
         NSEventModifierFlags::Command
     };
     item.setKeyEquivalentModifierMask(modifiers);
     menu.addItem(&item);
-    // The menu owns the item already; the returned local claim permits target configuration without retaining a foreground graph.
+    // 菜单已经拥有该项；返回的局部引用只用于设置目标，不持有前台对象图。
     item
 }
 
 impl Drop for ApplicationMenuScope<'_> {
     fn drop(&mut self) {
-        // A stopped/failed initialization restores native process state before this scope releases its old menu.
+        // 停止或失败的初始化先恢复原生菜单状态，随后再释放本作用域保存的原菜单。
         self.application.setMainMenu(self.previous.as_deref());
     }
 }

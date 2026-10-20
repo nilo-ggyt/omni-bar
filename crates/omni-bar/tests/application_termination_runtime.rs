@@ -55,7 +55,7 @@ mod native {
             };
             let origin = match arguments[3].to_str() {
                 // Ordinary app-local menu delivery and true dispatch origin have independent child evidence.
-                Some("menu-event") => NativeTerminationProbeOrigin::MenuEvent,
+                Some("menu-action") => NativeTerminationProbeOrigin::MenuAction,
                 Some("dispatch") => NativeTerminationProbeOrigin::Dispatch,
                 // An alternate direct-selector fallback cannot mask a route-specific failure.
                 _ => return Err("unknown termination probe origin".into()),
@@ -69,7 +69,7 @@ mod native {
         let mut failures = Vec::new();
         for scenario in ["launcher", "markdown-dirty"] {
             // Each foreground exercises both production entry routes with independent native process state.
-            for origin in ["menu-event", "dispatch"] {
+            for origin in ["menu-action", "dispatch"] {
                 // A fresh process owns one fixture, native event loop and failure-only parent watchdog.
                 if let Err(error) = run_scenario(scenario, origin) {
                     // Preserve independent failures without retries, alternate closes or survivor allowances.
@@ -259,8 +259,8 @@ mod native {
                 // The parent independently declares a serial-main-dispatch regression case.
                 "termination_probe event=origin value=dispatch"
             } else {
-                // Ordinary menu delivery must prove its actual current NSEvent at delegate entry.
-                "termination_probe event=origin value=menu_event"
+                // 原菜单动作不依赖退出快捷键；target/action必须仍由已安装的原NSMenu拥有。
+                "termination_probe event=origin value=menu_action"
             },
             "termination_probe event=foreground_ready production_owner=true",
         ];
@@ -290,13 +290,12 @@ mod native {
             // The originating GCD callback must return before any modal delegate wait is entered.
             expected.push("termination_probe event=dispatch_request_returned");
         } else {
-            // Actual app-local event delivery enters the ordinary standard Quit menu, without a direct selector fallback.
+            // 仍保真实菜单入口与action退栈顺序，不能去掉两场景或改成直接coordinator调用。
             expected.extend([
-                "termination_probe event=menu_event_posted",
-                // 菜单 action 必须真实接收原事件并先返回，较晚才进入正常 delegate 等待。
-                "termination_probe event=menu_action current_event_matches=true",
+                "termination_probe event=menu_action_requested key_equivalent_empty=true",
+                "termination_probe event=menu_action original_item_matches=true",
                 "termination_probe event=menu_request_returned",
-                "termination_probe event=menu_delivery current_event_matches=true",
+                "termination_probe event=menu_action_returned",
             ]);
         }
         let terminal = evidence

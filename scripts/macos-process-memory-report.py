@@ -12,7 +12,8 @@ import sys
 MAX_BYTES = 64 * 1024 * 1024
 MAX_LINE_BYTES = 16384
 MAX_RECORDS = 65536
-BUDGET_BYTES = 100000000
+# 与采样器使用相同的严格150MB边界；单PID低于边界仍不等于整产品验收通过。
+BUDGET_BYTES = 150000000
 U64_MAX = (1 << 64) - 1
 UNVERIFIED = 78
 INVALID = 65
@@ -158,7 +159,8 @@ def inspect_stream(stream, observer_exit_code):
         gap = 0
         peak = decimal(record["lifetime_peak_bytes"])
         current = decimal(record["physical_footprint_bytes"])
-        require(peak >= current, "unsupported_peak_counter")
+        # XNU依次读取peak和current；期间分配可使后者更大，两个原值必须分别保留。
+        # 不能用max(current, peak)伪造内核峰值；最终预算仍独立检查这两项真实计数。
         if previous is not None:
             # 同一 epoch 的 lifetime peak 不可倒退；不同采样点也要比较休眠时钟差值。
             previous_mid, previous_awake, previous_width, previous_peak = previous
@@ -192,17 +194,17 @@ def inspect_stream(stream, observer_exit_code):
     require((decimal(footer["max_current_bytes"]), decimal(footer["max_lifetime_peak_bytes"]),
              decimal(footer["max_gap_ns"]), decimal(footer["max_query_span_ns"])) ==
             (max_current, max_peak, max_gap, max_span), "summary_counter_mismatch")
-    require(footer["single_pid_current_within_budget"] is (max_current <= BUDGET_BYTES) and
-            footer["single_pid_lifetime_within_budget"] is (max_peak <= BUDGET_BYTES), "wrong_budget_result")
-    expected_exit = 1 if max(max_current, max_peak) > BUDGET_BYTES else UNVERIFIED
+    require(footer["single_pid_current_within_budget"] is (max_current < BUDGET_BYTES) and
+            footer["single_pid_lifetime_within_budget"] is (max_peak < BUDGET_BYTES), "wrong_budget_result")
+    expected_exit = 1 if max(max_current, max_peak) >= BUDGET_BYTES else UNVERIFIED
     require(observer_exit_code == expected_exit, "observer_exit_mismatch")
     return {"schema": "omni-process-memory-report-v1", "observation_valid": True,
             "scope": "single_pid", "membership": "unverified", "pid": epoch[0], "records": count,
             "budget_bytes": str(BUDGET_BYTES), "sampled_max_current_bytes": str(max_current),
             "max_lifetime_peak_bytes": str(max_peak), "duration_ns": str(duration),
             "interval_ns": str(interval), "max_gap_ns": str(max_gap), "max_query_span_ns": str(max_span),
-            "single_pid_current_within_budget": max_current <= BUDGET_BYTES,
-            "single_pid_lifetime_within_budget": max_peak <= BUDGET_BYTES,
+            "single_pid_current_within_budget": max_current < BUDGET_BYTES,
+            "single_pid_lifetime_within_budget": max_peak < BUDGET_BYTES,
             "steady_growth_assessed": False, "whole_product_budget_pass": False,
             "source_sha256": final_digest, "source_bytes": final_bytes, "exit_code": expected_exit}
 

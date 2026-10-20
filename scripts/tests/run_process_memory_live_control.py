@@ -226,10 +226,10 @@ def execute(root, include_over_budget):
                     "lifetime_peak_was_not_preserved")
             if include_over_budget:
                 # 超预算是显式额外阶段，仍只占用这个有上限的合成进程。
-                command(controller, "ALLOC128", "allocated128", deadline, events)
-                collect(binary, identity, root, "allocated128", deadline, cases, 1)
+                command(controller, "ALLOC192", "allocated192", deadline, events)
+                collect(binary, identity, root, "allocated192", deadline, cases, 1)
                 command(controller, "FREE", "freed", deadline, events)
-                over_freed = collect(binary, identity, root, "freed128", deadline, cases, 1)
+                over_freed = collect(binary, identity, root, "freed192", deadline, cases, 1)
                 require(over_freed["single_pid_current_within_budget"] is True and
                         over_freed["single_pid_lifetime_within_budget"] is False,
                         "post_release_lifetime_was_not_distinct")
