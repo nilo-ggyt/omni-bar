@@ -22,7 +22,9 @@ pub use platform::macos::run_native_builtins_runtime_probe;
 pub use platform::macos::{LauncherRuntimeProbeResult, run_native_launcher_runtime_probe};
 
 #[cfg(all(target_os = "macos", feature = "native-acceptance"))]
-pub use platform::macos::acceptance_fixture::run_isolated_acceptance_application;
+pub use platform::macos::acceptance_fixture::{
+    release_isolated_acceptance_pasteboard, run_isolated_acceptance_application,
+};
 #[cfg(all(target_os = "macos", feature = "native-product-acceptance"))]
 pub use platform::macos::acceptance_product::run_native_product_acceptance;
 #[cfg(all(target_os = "macos", feature = "native-acceptance"))]

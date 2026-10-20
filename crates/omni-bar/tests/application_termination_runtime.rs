@@ -12,10 +12,12 @@ mod native {
 
     use omni_native_runtime::{
         NATIVE_TERMINATION_PROBE_INSERTION, NativeTerminationProbeOrigin,
-        NativeTerminationProbeScenario, run_native_termination_probe_child,
+        NativeTerminationProbeScenario, release_isolated_acceptance_pasteboard,
+        run_native_termination_probe_child,
     };
 
     const CHILD_ARGUMENT: &str = "--termination-probe-child";
+    const PASTEBOARD_RELEASE_ARGUMENT: &str = "--release-fixture-pasteboard";
     const FAILURE_DEADLINE: Duration = Duration::from_secs(20);
     const MAX_LOG_BYTES: usize = 1024 * 1024;
     const ACCEPTANCE_BODY: &str = concat!(
@@ -34,6 +36,16 @@ mod native {
     /// Run only exact child modes or four bounded parent scenarios; never initialize AppKit in the parent.
     pub(super) fn run() -> Result<(), String> {
         let arguments = std::env::args_os().collect::<Vec<_>>();
+        if arguments
+            .get(1)
+            .is_some_and(|value| value == PASTEBOARD_RELEASE_ARGUMENT)
+        {
+            if arguments.len() != 3 {
+                return Err("剪贴板回收子进程只接受一个自有夹具目录".into());
+            }
+            // 本独立主线程只调用原拥有层的精确清板入口，不启动另一个NSApplication图。
+            return release_isolated_acceptance_pasteboard(Path::new(&arguments[2]));
+        }
         if arguments
             .get(1)
             .is_some_and(|value| value == CHILD_ARGUMENT)
@@ -159,6 +171,26 @@ mod native {
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
+    /// 父进程不进入AppKit；原子进程reap后，用同一有界子进程协议归还它的私有板。
+    fn release_fixture_pasteboard(fixture: &Path) -> Result<(), String> {
+        let mut child = Command::new(std::env::current_exe().map_err(|error| error.to_string())?)
+            .args([
+                std::ffi::OsStr::new(PASTEBOARD_RELEASE_ARGUMENT),
+                fixture.as_os_str(),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|error| format!("无法启动夹具剪贴板回收子进程：{error}"))?;
+        // 与原Native子进程一样由Child唯一拥有并reap；超时不能留下另一个清理进程。
+        match wait_owned_child(&mut child)? {
+            ChildCompletion::Exited(status) if status.success() => Ok(()),
+            ChildCompletion::Exited(status) => Err(format!("夹具剪贴板回收失败：{status}")),
+            ChildCompletion::TimedOut => Err("夹具剪贴板回收超过原有20秒期限".into()),
+        }
+    }
+
     /// Validate exact event order and final synthetic bytes after real NSApplication process termination.
     fn run_scenario(scenario: &str, origin: &str) -> Result<(), String> {
         let directory = tempfile::Builder::new()
@@ -187,6 +219,13 @@ mod native {
             .spawn()
             .map_err(|error| error.to_string())?;
         let completion = wait_owned_child(&mut child);
+        let pasteboard_release = if completion.is_ok() {
+            // wait_owned_child的Ok两种结局都已真正wait/reap；正常退出和kill均走同一收尾。
+            // 目录仍归本TempDir独占，不能先删除目录再凭路径或复用inode猜测原板身份。
+            release_fixture_pasteboard(&fixture)
+        } else {
+            Err("原子进程的reap未完整确认，保留夹具，禁止并行接管其剪贴板".into())
+        };
         let stdout = read_log(&stdout_path);
         let stderr = read_log(&stderr_path);
         let execution = (|| {
@@ -222,6 +261,12 @@ mod native {
             // Retain both concrete causes instead of hiding saved-data evidence behind the first timeout.
             (Err(execution), Err(proof)) => Err(format!("{execution}; {proof}")),
         };
+        let validation = match (validation, pasteboard_release) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), Err(cleanup)) => Err(cleanup),
+            (Err(error), Err(cleanup)) => Err(format!("{error}; 剪贴板回收同时失败：{cleanup}")),
+        }; // 数据/退出首因不能被清理结果覆盖，清理失败也不能被一次业务成功掩盖。
         if let Err(error) = validation {
             // Keep exactly this parent-created directory; do not remove or overwrite any other artifact path.
             let preserved = directory.keep();

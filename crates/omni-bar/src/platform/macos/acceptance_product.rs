@@ -10,6 +10,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use objc2::rc::{Retained, autoreleasepool};
+use objc2::runtime::{AnyObject, Sel};
 use objc2::{ClassType, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSEventType};
 use objc2_foundation::{NSNotification, NSPoint};
@@ -393,6 +394,39 @@ define_class!(
             }
             // SAFETY: 原event在主线程同步栈内存活；匹配的super selector保持NSApplication公开ABI。
             unsafe { let _: () = msg_send![super(self), sendEvent: event]; }
+            if event.r#type() == NSEventType::LeftMouseDown {
+                // 原按钮的Down/tracking已真正返回，才从当前driver复制表格验收桥。
+                // 不跨super保DRIVER或ACTIVE租约，Native重入不能继承此前借用的原图。
+                let probe = DRIVER.with_borrow(|slot| {
+                    slot.as_ref()?.table.as_ref().map(Rc::clone)
+                });
+                if let Some(probe) = probe
+                    && let Err(error) = probe.did_dispatch_hosted_event(event)
+                {
+                    // MD只匹配事前保存的原Down唯一编号及窗口等派发值，再归还有限事件租约。
+                    // 这里只记鼠标返回；实际selector可更晚交付，不据此猜业务已经入队。
+                    fail(error);
+                }
+            }
+        }
+
+        #[unsafe(method(sendAction:to:from:))]
+        /// 真实系统 target/action 返回边界；只在验收 App 中被动报告，不改产品 selector 或目标。
+        fn send_action(&self, action: Sel, target: Option<&AnyObject>, sender: Option<&AnyObject>) -> bool {
+            // SAFETY: 原selector/target/sender均来自本次AppKit同步调用，匹配公开NSApplication ABI；
+            // super恰执行一次并保留原bool结果，不持DRIVER/ACTIVE借用跨越真实业务派发。
+            let sent: bool = unsafe { msg_send![super(self), sendAction: action, to: target, from: sender] };
+            let probe = DRIVER.with_borrow(|slot| {
+                slot.as_ref()?.table.as_ref().map(Rc::clone)
+            });
+            if let Some(probe) = probe
+                && let Err(error) = probe.did_dispatch_hosted_action(action, target, sender, sent)
+            {
+                // 原按钮的具体selector已返回才有业务排队证据；MD仍须等原Down和真实CPU终点。
+                // 失败沿原driver收尾，不能重发action、延长期限或把系统sent当业务完成。
+                fail(error);
+            }
+            sent
         }
     }
 );
