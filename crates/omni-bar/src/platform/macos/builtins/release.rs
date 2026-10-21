@@ -97,12 +97,6 @@ impl CloseObservation {
             && self.failure.is_none()
             && self.borrowed.is_detached()
     }
-
-    /// Probes reuse session cache facts while still requiring actual foreground-panel and project-role release.
-    pub(super) fn is_released(&self) -> bool {
-        // Observation alone supplies no lifecycle authority; production additionally requires its actual cohort event.
-        self.payload_released() && self.panel.load().is_none()
-    }
 }
 
 /// A closing operation retains only weak graphs, native signal counters and its original scalar request.

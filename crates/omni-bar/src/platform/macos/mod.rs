@@ -24,27 +24,26 @@ mod native_deallocation;
 mod native_editor;
 mod native_payload;
 mod plugin_host;
+mod run_loop;
+#[cfg(feature = "native-acceptance")]
 mod runtime_probes;
 mod shortcuts;
+mod storage;
 mod termination;
 
 use launcher_results::*;
 use launcher_ui::NativeLauncherSurface;
+pub(crate) use run_loop::{run_application, run_benchmark_application, run_smoke_test};
+use storage::{
+    NativePluginStorageLocations, application_pasteboard, native_plugin_storage_locations,
+};
 
-pub use runtime_probes::run_native_builtins_runtime_probe;
 #[cfg(feature = "native-acceptance")]
 pub use runtime_probes::{LauncherRuntimeProbeResult, run_native_launcher_runtime_probe};
 
 use std::cell::RefCell;
-use std::path::PathBuf;
 
-use dispatch2::DispatchQueue;
-use objc2::rc::autoreleasepool;
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
-use objc2_foundation::{
-    MainThreadMarker, NSSearchPathDirectory, NSSearchPathDomainMask,
-    NSSearchPathForDirectoriesInDomains,
-};
+use objc2_foundation::MainThreadMarker;
 use omni_plugin_sdk::PluginCloseIntent;
 
 use crate::installed_application_catalog::{ApplicationLaunchError, launch_application_bundle};
@@ -62,7 +61,6 @@ const MACOS_KEYPAD_ENTER_KEY_CODE: u16 = 76;
 const MACOS_UP_ARROW_KEY_CODE: u16 = 126;
 const MACOS_DOWN_ARROW_KEY_CODE: u16 = 125;
 const QUIT_ACTIVATION_CODE: &str = "quit";
-const OMNI_BUNDLE_IDENTIFIER: &str = "com.omnibar.desktop";
 
 thread_local! {
     static ACTIVE_SURFACE: RefCell<Option<NativeLauncherSurface>> = const { RefCell::new(None) };
@@ -70,69 +68,6 @@ thread_local! {
     static CLOSING_SURFACE: RefCell<Option<NativeLauncherSurface>> = const { RefCell::new(None) };
     static FOREGROUND_STATE: RefCell<ForegroundSurfaceState> =
         RefCell::new(ForegroundSurfaceState::new());
-}
-
-/// Lazily resolved paths; merely computing these locations opens no document or persistent file.
-#[derive(Clone)]
-struct NativePluginStorageLocations {
-    workspace_root: PathBuf,
-    application_support: PathBuf,
-}
-
-/// Resolve public user-domain directories without pre-creating a plugin workspace at idle.
-fn native_plugin_storage_locations() -> Result<NativePluginStorageLocations, String> {
-    #[cfg(feature = "native-acceptance")]
-    if let Some(locations) = acceptance_fixture::storage_locations() {
-        // Only the opt-in diagnostic executable can install these caller-owned synthetic authorities.
-        return Ok(locations);
-    }
-    // Fail before plugin activation if either OS-provided base directory is unavailable.
-    let documents = resolve_user_domain_directory(
-        NSSearchPathDirectory::DocumentDirectory,
-        "用户文稿目录不可用",
-    )?;
-    let application_support = resolve_user_domain_directory(
-        NSSearchPathDirectory::ApplicationSupportDirectory,
-        "用户应用支持目录不可用",
-    )?;
-    Ok(NativePluginStorageLocations {
-        workspace_root: documents.join("OMNI"),
-        application_support: application_support.join(OMNI_BUNDLE_IDENTIFIER),
-    })
-}
-
-/// Resolve the platform pasteboard at the explicit capability boundary, without retaining its body.
-fn application_pasteboard() -> objc2::rc::Retained<objc2_app_kit::NSPasteboard> {
-    #[cfg(feature = "native-acceptance")]
-    if let Some(name) = acceptance_fixture::pasteboard_name() {
-        // Synthetic acceptance never reads personal history through Host capability adapters.
-        return objc2_app_kit::NSPasteboard::pasteboardWithName(
-            &objc2_foundation::NSString::from_str(&name),
-        );
-    }
-    // Normal product calls use the public system pasteboard only in response to foreground work.
-    objc2_app_kit::NSPasteboard::generalPasteboard()
-}
-
-/// Decode an OS-provided path once; never silently substitute a process working directory.
-fn resolve_user_domain_directory(
-    directory: NSSearchPathDirectory,
-    unavailable_message: &'static str,
-) -> Result<PathBuf, String> {
-    let paths = NSSearchPathForDirectoriesInDomains(
-        directory,
-        NSSearchPathDomainMask::UserDomainMask,
-        true,
-    );
-    let path = paths
-        .firstObject()
-        .ok_or_else(|| unavailable_message.to_owned())?;
-    let path = PathBuf::from(path.to_string());
-    if path.as_os_str().is_empty() {
-        // An empty path would accidentally redirect persistence into the application's working directory.
-        return Err(unavailable_message.to_owned());
-    }
-    Ok(path)
 }
 
 /// Snapshot the callback target before any action can reenter the global surface owner.
@@ -336,12 +271,12 @@ impl ActivationSink for NativeActivationSink {
 
 /// Separate a malformed catalog selection from a valid action rejected by its execution boundary.
 #[derive(Debug, Eq, PartialEq)]
-enum NativeLauncherDispatchError<E> {
+enum NativeLauncherDispatchError {
     Conversion(LauncherActionConversionError),
-    Sink(E),
+    Sink(NativeLauncherActivationError),
 }
 
-impl<E: std::fmt::Display> std::fmt::Display for NativeLauncherDispatchError<E> {
+impl std::fmt::Display for NativeLauncherDispatchError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             // Conversion errors mean no native action was attempted.
@@ -352,14 +287,11 @@ impl<E: std::fmt::Display> std::fmt::Display for NativeLauncherDispatchError<E> 
     }
 }
 
-/// Convert before dispatch; tests can observe routing without opening applications or native UI.
-fn activate_launcher_selection_with_sink<S>(
+/// Convert a catalog selection before the concrete native sink can acquire platform resources.
+fn activate_launcher_selection_with_sink(
     selection: NativeLauncherSelection,
-    sink: &S,
-) -> Result<(), NativeLauncherDispatchError<S::Error>>
-where
-    S: ActivationSink + ?Sized,
-{
+    sink: &NativeActivationSink,
+) -> Result<(), NativeLauncherDispatchError> {
     // Reject malformed selections before the sink acquires any resources.
     let action = selection
         .launcher_action()
@@ -539,166 +471,13 @@ fn toggle_foreground_surface() {
     }
 }
 
-/// Enter the real resident application's event loop with one app-owned shortcut registration.
-pub(crate) fn run_application() -> Result<(), String> {
-    run_application_until(None)
-}
-
-/// Measure the initialized production resident state rather than an uninitialized parked process.
-pub(crate) fn run_benchmark_application(seconds: u64) -> Result<(), String> {
-    // The external sampler observes the same initialization and hidden event loop as normal launch.
-    run_application_until(Some(seconds))
-}
-
-/// Share product initialization so benchmark mode cannot silently omit framework/shortcut costs.
-fn run_application_until(benchmark_seconds: Option<u64>) -> Result<(), String> {
-    // Reject a worker-thread caller before any AppKit object or Carbon registration is acquired.
-    let mtm =
-        MainThreadMarker::new().ok_or_else(|| "原生运行时必须在 AppKit 主线程启动".to_owned())?;
-    let result = autoreleasepool(|_| {
-        // Resolve the real shared application, then install the same accessory policy in both modes.
-        let application = NSApplication::sharedApplication(mtm);
-        // The app delegate belongs to the resident process, never to a transient business surface.
-        let _delegate = application_delegate::ResidentDelegateScope::install(&application, mtm);
-        let accessory_policy = NSApplicationActivationPolicy::Accessory;
-        if application.activationPolicy() != accessory_policy
-            && !application.setActivationPolicy(accessory_policy)
-            && application.activationPolicy() != accessory_policy
-        {
-            // Preserve an explicit initialization failure instead of claiming a resident benchmark.
-            return Err("无法设置 accessory 激活策略".to_owned());
-        }
-        if let Err(error) = shortcuts::install(mtm) {
-            if benchmark_seconds.is_some() {
-                // Hidden-resident benchmarks require a real active registration; a visible recovery window is a different workload.
-                return Err(error);
-            }
-            // Normal startup preserves settings failure and offers existing settings access, without acquiring another hotkey.
-            eprintln!("启动器快捷键未注册：{error}");
-            DispatchQueue::main().exec_async(|| {
-                if let Some(marker) = MainThreadMarker::new() {
-                    // After initialization returns, request the normal Launcher once; its foreground state rejects duplicate windows.
-                    show_launcher_surface(marker);
-                }
-            });
-        }
-        // Standard Quit and editing selectors share the same resident delegate and focused native responder.
-        let _menu = application_menu::ApplicationMenuScope::install(&application, mtm);
-        #[cfg(feature = "native-input-trace")]
-        {
-            // Explicit synthetic entry points retain their weak menu targets; ordinary product builds omit this path.
-            acceptance_fixture::install_input_trace_controls(mtm)?;
-        }
-        if let Some(seconds) = benchmark_seconds {
-            // This one-shot shutdown exists only in the explicit benchmark command; product idle
-            // owns no periodic timer. A main-queue callback avoids moving AppKit objects across threads.
-            println!("benchmark_mode=production_resident_hidden");
-            println!("benchmark_seconds={seconds}");
-            println!("measurement=external_whole_process_physical_footprint");
-            let deadline =
-                dispatch2::DispatchTime::try_from(std::time::Duration::from_secs(seconds))
-                    .map_err(|_| "Benchmark deadline is out of range".to_owned())?;
-            DispatchQueue::main()
-                .after(deadline, || {
-                    // Return from the deadline's main-dispatch block before AppKit can wait for native release.
-                    if let Err(error) = termination::request_application_termination() {
-                        // A failed request remains an explicit benchmark failure instead of bypassing save/release policy.
-                        eprintln!("benchmark termination could not be scheduled: {error}");
-                    }
-                })
-                .map_err(|_| "Benchmark shutdown could not be scheduled".to_owned())?;
-        }
-        // AppKit owns event-loop autorelease pools and sleeps waiting for real events at hidden idle.
-        application.run();
-        // Explicit run-loop stop also releases the Carbon owner; normal terminate uses applicationWillTerminate:.
-        shortcuts::uninstall(mtm);
-        // Menu/delegate scopes restore prior non-owning process links on stopped-loop and error exits.
-        Ok(())
-    });
-    if result.is_err() {
-        // A partial initialization may already own Carbon resources; error exit must release them explicitly too.
-        shortcuts::uninstall(mtm);
-    }
-    result
-}
-
-/// Verify minimal native construction and pure transition ordering without using user documents.
-pub(crate) fn run_smoke_test() -> Result<(), String> {
-    // A standalone main-thread command is required; Rust's threaded unit harness is unsuitable.
-    let mtm = MainThreadMarker::new()
-        .ok_or_else(|| "原生 smoke test 必须在 AppKit 主线程运行".to_owned())?;
-    autoreleasepool(|_| {
-        // This intentionally does not install a shortcut or read real clipboard/workspace content.
-        let application = NSApplication::sharedApplication(mtm);
-        let _ = application.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-        let state = ForegroundSurfaceState::new();
-        let target = state.begin_creation().map_err(|error| error.to_string())?;
-        if target != crate::ResumeTarget::Launcher {
-            // A fresh state must never restore an uninitialized feature or plugin session.
-            return Err("初始恢复目标必须是 Launcher".to_owned());
-        }
-        let surface = NativeLauncherSurface::new(mtm)?;
-        if surface.controller.result_count() != 5 {
-            // The current static composition must expose all five initial capabilities.
-            return Err("Launcher 空查询必须初始化五个内建入口".to_owned());
-        }
-        // Commit the hidden prepared graph before exercising explicit native edge removal.
-        state
-            .complete_creation(crate::ResumeTarget::Launcher)
-            .map_err(|error| error.to_string())?;
-        surface.prepare_to_close()?;
-        surface.release_native_ownership();
-        drop(surface);
-        // Pure state ordering complements graph probes; it does not itself prove native deallocation.
-        state
-            .begin_destruction(
-                ForegroundSurface::Launcher,
-                SurfaceCloseIntent::DismissAndResume,
-            )
-            .map_err(|error| error.to_string())?;
-        state
-            .complete_destruction(ForegroundSurface::Launcher)
-            .map_err(|error| error.to_string())?;
-        state
-            .consume_destroyed_barrier(ForegroundSurface::Launcher)
-            .map_err(|error| error.to_string())?;
-        if state.begin_creation().is_err() {
-            // Consuming the previous surface's once-only barrier must enable the next creation.
-            return Err("Destroyed 屏障消费后应允许下一次创建".to_owned());
-        }
-        // Describe the limited observation so automation cannot confuse smoke with complete acceptance.
-        println!("smoke_test=ok");
-        println!("platform=macos-appkit");
-        println!("webview_dependency=none");
-        Ok(())
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
-    use std::path::PathBuf;
 
     use super::*;
     use crate::installed_application_catalog::InstalledApplication;
     use crate::launcher_catalog::{LauncherResult, LauncherResultKind};
     use objc2_app_kit::NSEventModifierFlags;
-
-    /// Observe owned dispatch values without starting processes or touching AppKit.
-    #[derive(Default)]
-    struct RecordingActivationSink {
-        actions: RefCell<Vec<LauncherAction>>,
-    }
-
-    impl ActivationSink for RecordingActivationSink {
-        type Error = ();
-
-        fn activate(&self, action: LauncherAction) -> Result<(), Self::Error> {
-            // Test-only recording preserves action order without running the production sink.
-            self.actions.borrow_mut().push(action);
-            Ok(())
-        }
-    }
 
     /// Opening Launcher enumerates static capabilities without filesystem application results.
     #[test]
@@ -778,57 +557,6 @@ mod tests {
         ));
     }
 
-    /// The same conversion boundary dispatches every supported category without native side effects.
-    #[test]
-    fn launcher_selection_dispatches_plugins_built_ins_applications_and_quit() {
-        // The same conversion boundary dispatches every supported category without native side effects.
-        let sink = RecordingActivationSink::default();
-        let application = InstalledApplication::from_search_match(
-            "示例应用",
-            PathBuf::from("/Applications/示例应用.app"),
-            0,
-        );
-        let selections = vec![
-            NativeLauncherSelection::Catalog(
-                crate::composition::launcher_catalog().bundled_results()[0],
-            ),
-            NativeLauncherSelection::Catalog(
-                crate::composition::launcher_catalog().bundled_results()[1],
-            ),
-            NativeLauncherSelection::Catalog(
-                crate::composition::launcher_catalog().bundled_results()[2],
-            ),
-            NativeLauncherSelection::Catalog(
-                crate::composition::launcher_catalog().bundled_results()[3],
-            ),
-            NativeLauncherSelection::Catalog(
-                crate::composition::launcher_catalog().bundled_results()[4],
-            ),
-            NativeLauncherSelection::Application(application),
-            NativeLauncherSelection::Quit,
-        ];
-
-        for selection in selections {
-            // Convert each owned snapshot after the hypothetical Launcher close handoff.
-            activate_launcher_selection_with_sink(selection, &sink)
-                .expect("recording sink must accept every launcher action");
-        }
-
-        // The exact order and static command evidence survive every category conversion.
-        assert_eq!(
-            sink.actions.into_inner(),
-            vec![
-                LauncherAction::plugin(crate::plugins::MARKDOWN_REGISTRATION, "open"),
-                LauncherAction::built_in("clipboard"),
-                LauncherAction::built_in("calc"),
-                LauncherAction::built_in("convert"),
-                LauncherAction::built_in("settings"),
-                LauncherAction::application("示例应用", "/Applications/示例应用.app"),
-                LauncherAction::quit(),
-            ]
-        );
-    }
-
     /// Malformed static application labels cannot substitute for a validated bundle target.
     #[test]
     fn launcher_selection_reports_catalog_conversion_failure() {
@@ -842,9 +570,8 @@ mod tests {
             plugin_command_id: None,
         });
 
-        let error =
-            activate_launcher_selection_with_sink(malformed, &RecordingActivationSink::default())
-                .expect_err("an application catalog row lacks a verified bundle path");
+        let error = activate_launcher_selection_with_sink(malformed, &NativeActivationSink)
+            .expect_err("an application catalog row lacks a verified bundle path");
         assert_eq!(
             error,
             NativeLauncherDispatchError::Conversion(

@@ -5,7 +5,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// A dimension constrains which scale/offset conversions can be combined.
+/// A dimension constrains which scales and base-zero coordinates can be combined.
 enum MeasurementDimension {
     Length,
     Mass,
@@ -56,12 +56,12 @@ pub(crate) enum UnitConversionError {
 }
 
 #[derive(Clone, Copy)]
-/// A unit maps to its dimension's base using one affine transformation.
+/// A unit's explicit base-zero coordinate keeps the physical boundary separate from rounding.
 struct Unit {
     definition: UnitDefinition,
     dimension: MeasurementDimension,
     scale_to_base: f64,
-    offset_to_base: f64,
+    zero_in_unit: f64,
 }
 
 const UNITS: &[Unit] = &[
@@ -77,14 +77,8 @@ const UNITS: &[Unit] = &[
     mass("tonne", "吨", "t", 1_000.0),
     mass("ounce", "盎司", "oz", 0.028_349_523_125),
     mass("pound", "磅", "lb", 0.453_592_37),
-    temperature("celsius", "摄氏度", "°C", 1.0, 273.15),
-    temperature(
-        "fahrenheit",
-        "华氏度",
-        "°F",
-        5.0 / 9.0,
-        255.372_222_222_222_2,
-    ),
+    temperature("celsius", "摄氏度", "°C", 1.0, -273.15),
+    temperature("fahrenheit", "华氏度", "°F", 5.0 / 9.0, -459.67),
     temperature("kelvin", "开尔文", "K", 1.0, 0.0),
 ];
 
@@ -100,7 +94,7 @@ const fn length(id: &'static str, label: &'static str, symbol: &'static str, sca
         },
         dimension: MeasurementDimension::Length,
         scale_to_base: scale,
-        offset_to_base: 0.0,
+        zero_in_unit: 0.0,
     }
 }
 
@@ -116,7 +110,7 @@ const fn mass(id: &'static str, label: &'static str, symbol: &'static str, scale
         },
         dimension: MeasurementDimension::Mass,
         scale_to_base: scale,
-        offset_to_base: 0.0,
+        zero_in_unit: 0.0,
     }
 }
 
@@ -126,9 +120,10 @@ const fn temperature(
     label: &'static str,
     symbol: &'static str,
     scale: f64,
-    offset: f64,
+    absolute_zero: f64,
 ) -> Unit {
-    // Temperature needs both scale and offset to reach kelvin; convert enforces the absolute-zero bound.
+    // Store absolute zero in the input unit itself. The prior rounded Kelvin offset could make
+    // exactly -459.67 degrees Fahrenheit produce a negative residual and reject valid user input.
     Unit {
         definition: UnitDefinition {
             id,
@@ -138,7 +133,7 @@ const fn temperature(
         },
         dimension: MeasurementDimension::Temperature,
         scale_to_base: scale,
-        offset_to_base: offset,
+        zero_in_unit: absolute_zero,
     }
 }
 
@@ -148,7 +143,7 @@ pub(crate) fn definitions() -> Vec<UnitDefinition> {
     UNITS
         .iter()
         .map(|unit| {
-            // Presentation receives no mutable access to the canonical scale/offset table.
+            // Presentation receives no mutable access to the canonical scale or physical boundary.
             unit.definition
         })
         .collect()
@@ -174,14 +169,16 @@ pub(crate) fn convert(
         return Err(UnitConversionError::DimensionMismatch);
     }
 
-    // Perform the affine transform through the dimension's common base.
-    let base_value = value.mul_add(from.scale_to_base, from.offset_to_base);
-    if from.dimension == MeasurementDimension::Temperature && base_value < 0.0 {
-        // Negative kelvin would violate the supported temperature model.
+    if from.dimension == MeasurementDimension::Temperature && value < from.zero_in_unit {
+        // Validate in the user's unit before arithmetic. This rejects every representable value
+        // below the true catalog boundary without adding an epsilon or accepting negative Kelvin.
         return Err(UnitConversionError::BelowAbsoluteZero);
     }
 
-    let converted = (base_value - to.offset_to_base) / to.scale_to_base;
+    // Subtract the shared base-zero coordinate before scaling, so an exact boundary produces
+    // exact zero and its nearest valid neighbor stays nonnegative. Length and mass use zero.
+    let base_value = (value - from.zero_in_unit) * from.scale_to_base;
+    let converted = base_value / to.scale_to_base + to.zero_in_unit;
     if !converted.is_finite() {
         // Extreme finite inputs may still overflow an output unit's scale.
         return Err(UnitConversionError::NonFiniteValue);
@@ -264,6 +261,22 @@ mod tests {
             convert(-274.0, "celsius", "kelvin").unwrap_err(),
             UnitConversionError::BelowAbsoluteZero
         );
+        // The exact physical boundary must succeed in every exposed temperature unit. The next
+        // lower floating-point input remains an error, so no tolerance weakens the lower bound.
+        for (minimum, unit) in [
+            (-273.15, "celsius"),
+            (-459.67, "fahrenheit"),
+            (0.0, "kelvin"),
+        ] {
+            let result = convert(minimum, unit, "kelvin").unwrap();
+            assert_eq!(result.value, 0.0);
+            assert_eq!(result.display_value, "0");
+            assert_eq!(
+                convert(minimum.next_down(), unit, "kelvin"),
+                Err(UnitConversionError::BelowAbsoluteZero)
+            );
+            assert!(convert(minimum.next_up(), unit, "kelvin").unwrap().value > 0.0);
+        }
     }
 
     #[test]

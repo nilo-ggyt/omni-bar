@@ -94,12 +94,15 @@ pub fn launcher_fields_equal_case_insensitive(left: &str, right: &str) -> bool {
 
 /// Check only the field prefix, respecting scalar boundaries for non-ASCII input.
 fn launcher_field_starts_with_query(field: &str, query: &str) -> bool {
-    if query.is_ascii() {
-        // An ASCII prefix has a byte-sized boundary; short fields fail safely.
-        return field.as_bytes().get(..query.len()).is_some_and(|prefix| {
-            // A borrowed candidate prefix needs no temporary case conversion.
-            prefix.eq_ignore_ascii_case(query.as_bytes())
-        });
+    if query.is_ascii()
+        && let Some(prefix) = field
+            .as_bytes()
+            .get(..query.len())
+            .filter(|prefix| prefix.is_ascii())
+    {
+        // Only the compared prefix needs to be ASCII; do not rescan the entire field at each
+        // substring candidate. Unicode case pairs fall through to the shared scalar comparison.
+        return prefix.eq_ignore_ascii_case(query.as_bytes());
     }
 
     // Pair query scalars with only the corresponding field prefix, leaving the remaining suffix unread.
@@ -115,8 +118,9 @@ fn launcher_field_starts_with_query(field: &str, query: &str) -> bool {
 
 /// Search contiguous candidates; callers guarantee that the query is nonempty.
 fn launcher_field_contains_query(field: &str, query: &str) -> bool {
-    if query.is_ascii() {
-        // ASCII bytes cannot match a UTF-8 continuation byte, so candidates need no copied Unicode substring.
+    if query.is_ascii() && field.is_ascii() {
+        // Both ASCII operands permit borrowed byte windows. Mixed-script fields must use the
+        // same scalar comparison as equality or typing an ASCII alias can lose a valid result.
         return field.as_bytes().windows(query.len()).any(|candidate| {
             // Each borrowed window is checked without creating a substring.
             candidate.eq_ignore_ascii_case(query.as_bytes())
@@ -132,8 +136,9 @@ fn launcher_field_contains_query(field: &str, query: &str) -> bool {
 
 /// Match an ordered abbreviation in one pass with constant iterator state.
 fn launcher_field_contains_query_subsequence(field: &str, query: &str) -> bool {
-    if query.is_ascii() {
-        // ASCII queries can advance byte iterators without normalized storage.
+    if query.is_ascii() && field.is_ascii() {
+        // This fast path needs two ASCII operands; otherwise a Unicode scalar can satisfy an
+        // ASCII query character through the case rules used by every other quality tier.
         let mut query_bytes = query.bytes();
         let Some(mut expected) = query_bytes.next() else {
             // Defend the private helper even if called without the public guard.
@@ -226,6 +231,22 @@ mod tests {
         );
         // Unrelated localized fields must stay absent rather than matching through lossy normalization.
         assert_eq!(launcher_query_match_rank("笔记", "文件"), None);
+    }
+
+    /// ASCII input must retain the same Unicode case rules at every discovery quality tier.
+    #[test]
+    fn ascii_queries_match_unicode_case_pairs_in_application_names() {
+        // These are display names, not normalized copies. Prefix, word, interior and abbreviation
+        // matching must preserve the original borrowed text and the existing scalar case policy.
+        for (field, query, expected) in [
+            ("Keynote", "key", LauncherQueryMatchRank::Prefix),
+            ("工具 Keynote", "key", LauncherQueryMatchRank::WordPrefix),
+            ("myKeynote", "key", LauncherQueryMatchRank::Contains),
+            ("ſelected Notes", "sn", LauncherQueryMatchRank::Subsequence),
+            ("ıdea Board", "idea", LauncherQueryMatchRank::Prefix),
+        ] {
+            assert_eq!(launcher_query_match_rank(field, query), Some(expected));
+        }
     }
 
     /// Empty discovery and insufficient field text never manufacture a match or persistent query state.

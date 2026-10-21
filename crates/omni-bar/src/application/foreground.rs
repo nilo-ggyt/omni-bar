@@ -413,15 +413,15 @@ impl std::fmt::Display for SurfaceStateError {
         // Keep product messages bounded and independent from pointers/document paths.
         let message = match self {
             // Another active or transitional owner blocks this request.
-            Self::SurfaceAlreadyOwned => "前台 surface 已被占用",
+            Self::SurfaceAlreadyOwned => "前台界面已被占用",
             // The requested capability cannot close another owner's resource graph.
-            Self::SurfaceNotOwned => "请求的 surface 不属于当前 owner",
+            Self::SurfaceNotOwned => "请求的界面不属于当前会话",
             // Equivalent requests coalesce at the adapter's existing close owner.
-            Self::TransitionAlreadyPending => "前台 surface 转换正在进行",
+            Self::TransitionAlreadyPending => "前台界面正在切换",
             // Keep the first intent when another request asks for a different successor.
-            Self::OpposingTransitionPending => "相反方向的前台 surface 转换正在进行",
+            Self::OpposingTransitionPending => "另一方向的前台界面切换正在进行",
             // Final cleanup acknowledgement must precede the next acquisition.
-            Self::DestroyedBarrierPending => "上一个 native surface 尚未完成 Destroyed 屏障",
+            Self::DestroyedBarrierPending => "上一界面的资源清理尚未完成",
             // A stale, duplicate, or out-of-order callback cannot mutate current ownership.
             Self::UnexpectedLifecycleEvent => "原生生命周期事件与当前转换不匹配",
         };

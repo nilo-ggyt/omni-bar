@@ -67,12 +67,6 @@ impl ClipboardMonitor {
         source.activate();
         Ok(Self { source })
     }
-
-    /// Give a release probe a source reference without retaining any session or clipboard body.
-    pub(super) fn probe_source(&self) -> DispatchRetained<DispatchSource> {
-        // The probe can inspect cancellation after the session's owner is dropped.
-        self.source.retain()
-    }
 }
 
 impl Drop for ClipboardMonitor {
@@ -137,16 +131,6 @@ fn source_generation_for(pasteboard: &NSPasteboard) -> Result<ClipboardSourceGen
         source,
         change_count: pasteboard.changeCount(),
     })
-}
-
-/// Isolated runtime probes receive a finite synthetic identity without querying any real pasteboard.
-pub(super) fn probe_source_generation(change_count: isize) -> ClipboardSourceGeneration {
-    let name = (*b"omni.synthetic.builtins").map(u16::from);
-    ClipboardSourceGeneration {
-        source: ClipboardSourceIdentity::from_utf16(&name)
-            .expect("the static synthetic namespace fits the fixed source-name capacity"),
-        change_count,
-    }
 }
 
 /// Replace system plain text from a transient validated history body or calculated result.

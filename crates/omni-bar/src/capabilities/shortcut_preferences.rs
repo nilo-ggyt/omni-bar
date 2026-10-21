@@ -1,6 +1,6 @@
 //! Validated shortcut choices and small atomic preference files, independent of AppKit.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
@@ -367,17 +367,6 @@ impl ShortcutSettingsStore {
     /// promise rollback or survival of an unexpected power loss. Success observes both sync calls,
     /// rather than providing a broader guarantee about hardware caches or newly created ancestors.
     pub(crate) fn persist(&self, binding: ShortcutBinding) -> Result<(), ShortcutPreferencesError> {
-        // Keep production synchronization explicit while tests can fail the exact pre/postcommit stage.
-        self.persist_with_sync(binding, File::sync_all, File::sync_all)
-    }
-
-    /// Execute the storage protocol with finite sync operations, preserving the rename commit boundary.
-    fn persist_with_sync(
-        &self,
-        binding: ShortcutBinding,
-        sync_file: impl FnOnce(&File) -> std::io::Result<()>,
-        sync_directory: impl FnOnce(&File) -> std::io::Result<()>,
-    ) -> Result<(), ShortcutPreferencesError> {
         // Create only the application data directory needed by this explicit user change.
         let directory = self
             .settings_path
@@ -407,7 +396,10 @@ impl ShortcutSettingsStore {
         staged
             .flush()
             .map_err(|_| ShortcutPreferencesError::StorageUnavailable)?;
-        sync_file(staged.as_file()).map_err(|_| ShortcutPreferencesError::StorageUnavailable)?;
+        staged
+            .as_file()
+            .sync_all()
+            .map_err(|_| ShortcutPreferencesError::StorageUnavailable)?;
         // Same-directory persist atomically replaces the destination entry, never the contents of
         // a file reached through a destination hardlink/symlink. On failure PersistError retains
         // the unique temporary file, whose destructor removes only the path acquired above.
@@ -419,45 +411,15 @@ impl ShortcutSettingsStore {
         drop(committed_file);
         // Rename is the commit point: a failed directory sync must not trigger a native rollback
         // or report that the previous preference survived. No cleanup owns the destination now.
-        sync_directory(&directory_file)
+        directory_file
+            .sync_all()
             .map_err(|_| ShortcutPreferencesError::AppliedWithDurabilityUncertain)
-    }
-
-    /// Inject a failed precommit file synchronization into real staging for native-owner regressions.
-    #[cfg(test)]
-    pub(crate) fn persist_with_file_sync_failure(
-        &self,
-        binding: ShortcutBinding,
-    ) -> Result<(), ShortcutPreferencesError> {
-        self.persist_with_sync(
-            binding,
-            |_| {
-                // The real complete sibling exists, but this failure prevents its rename commit.
-                Err(std::io::Error::other("injected shortcut file sync failure"))
-            },
-            File::sync_all,
-        )
-    }
-
-    /// Inject a failed postcommit directory synchronization without changing real rename behavior.
-    #[cfg(test)]
-    pub(crate) fn persist_with_directory_sync_failure(
-        &self,
-        binding: ShortcutBinding,
-    ) -> Result<(), ShortcutPreferencesError> {
-        self.persist_with_sync(binding, File::sync_all, |_| {
-            // The new destination already exists; callers must preserve its committed identity.
-            Err(std::io::Error::other(
-                "injected shortcut directory sync failure",
-            ))
-        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
     use std::path::Path;
     use tempfile::tempdir;
@@ -520,59 +482,6 @@ mod tests {
         assert_eq!(store.load(), Err(ShortcutPreferencesError::InvalidBinding));
     }
 
-    /// A precommit sync failure cleans only each acquired random sibling and preserves old bytes.
-    #[test]
-    fn failed_file_sync_preserves_committed_file_and_cleans_each_owned_sibling() {
-        // Isolate the committed setting and compare exact bytes, not merely its parsed meaning.
-        let root = tempdir().unwrap();
-        let store = ShortcutSettingsStore::new(root.path().to_owned());
-        store.persist(ShortcutBinding::CommandSpace).unwrap();
-        let original = fs::read(&store.settings_path).unwrap();
-        let observed_paths = RefCell::new(Vec::new());
-        for binding in [ShortcutBinding::OptionSpace, ShortcutBinding::CommandShiftK] {
-            // Fail after the actual complete write/flush, while the previous destination still exists.
-            assert_eq!(
-                store.persist_with_sync(
-                    binding,
-                    |file| {
-                        let staged_names = entry_names(root.path())
-                            .into_iter()
-                            .filter(|name| {
-                                // Only the new random naming family belongs to this operation.
-                                name.starts_with(STAGING_PREFIX)
-                            })
-                            .collect::<Vec<_>>();
-                        assert_eq!(staged_names.len(), 1);
-                        let staged_path = root.path().join(&staged_names[0]);
-                        assert_eq!(
-                            fs::read(&staged_path).unwrap(),
-                            format!("{}\n", binding.canonical()).as_bytes()
-                        );
-                        assert_eq!(file.metadata().unwrap().nlink(), 1);
-                        assert_eq!(file.metadata().unwrap().permissions().mode() & 0o077, 0);
-                        assert_eq!(fs::read(&store.settings_path).unwrap(), original);
-                        observed_paths.borrow_mut().push(staged_path);
-                        Err(std::io::Error::other(
-                            "injected precommit synchronization failure",
-                        ))
-                    },
-                    |_| {
-                        // A failed file sync must never progress to rename or containing-directory sync.
-                        panic!("directory sync followed failed file sync")
-                    },
-                ),
-                Err(ShortcutPreferencesError::StorageUnavailable)
-            );
-            assert_eq!(fs::read(&store.settings_path).unwrap(), original);
-            assert_eq!(entry_names(root.path()), ["launcher-shortcut"]);
-        }
-        // Separate attempts acquire different random names; neither owner leaves a failed sibling behind.
-        let observed_paths = observed_paths.into_inner();
-        assert_ne!(observed_paths[0], observed_paths[1]);
-        assert!(observed_paths.iter().all(|path| !path.exists()));
-        assert_eq!(store.load(), Ok(Some(ShortcutBinding::CommandSpace)));
-    }
-
     /// Historical hardlinks/symlinks are unrelated entries, never write targets or cleanup candidates.
     #[test]
     fn historical_staging_links_preserve_victim_bytes_and_preexisting_entries() {
@@ -593,14 +502,7 @@ mod tests {
             }
             let expected_entries = entry_names(root.path());
             let original_inode = fs::metadata(&victim).unwrap().ino();
-            // Even failure cleanup may remove only the newly acquired sibling, never this old entry.
-            assert_eq!(
-                store.persist_with_file_sync_failure(ShortcutBinding::OptionSpace),
-                Err(ShortcutPreferencesError::StorageUnavailable)
-            );
-            assert_eq!(store.load(), Ok(Some(ShortcutBinding::CommandSpace)));
-            assert_eq!(entry_names(root.path()), expected_entries);
-            // Success likewise ignores the predictable legacy name instead of accepting its write authority.
+            // The real commit must ignore the predictable legacy name instead of accepting its write authority.
             store.persist(ShortcutBinding::OptionSpace).unwrap();
             assert_eq!(store.load(), Ok(Some(ShortcutBinding::OptionSpace)));
             assert_eq!(fs::read(&victim).unwrap(), b"unrelated valuable bytes");
@@ -718,28 +620,6 @@ mod tests {
         assert_eq!(entry_names(root.path()), ["launcher-shortcut"]);
     }
 
-    /// Directory synchronization is postcommit: its failure reports the new readable file truthfully.
-    #[test]
-    fn failed_directory_sync_reports_committed_setting_without_staging_residue() {
-        let root = tempdir().unwrap();
-        let store = ShortcutSettingsStore::new(root.path().to_owned());
-        store.persist(ShortcutBinding::CommandSpace).unwrap();
-        assert_eq!(
-            store.persist_with_sync(ShortcutBinding::OptionSpace, File::sync_all, |directory| {
-                // Observe the actual renamed destination before injecting only the final sync failure.
-                assert!(directory.metadata().unwrap().is_dir());
-                assert_eq!(store.load(), Ok(Some(ShortcutBinding::OptionSpace)));
-                assert_eq!(entry_names(root.path()), ["launcher-shortcut"]);
-                Err(std::io::Error::other(
-                    "injected postcommit synchronization failure",
-                ))
-            }),
-            Err(ShortcutPreferencesError::AppliedWithDurabilityUncertain)
-        );
-        assert_eq!(store.load(), Ok(Some(ShortcutBinding::OptionSpace)));
-        assert_eq!(entry_names(root.path()), ["launcher-shortcut"]);
-    }
-
     /// Existing custom keys keep their physical mapping and historical modifier/key aliases.
     #[test]
     fn saved_custom_chords_preserve_baseline_grammar_and_public_mappings() {
@@ -851,9 +731,9 @@ mod tests {
         }
     }
 
-    /// A valid old custom file survives loading and both failed and successful explicit replacement.
+    /// Loading preserves old user bytes; only an explicit successful save canonicalizes the setting.
     #[test]
-    fn custom_preference_reload_and_failure_preserve_exact_old_bytes() {
+    fn custom_preference_reload_preserves_old_bytes_until_explicit_save() {
         let root = tempdir().unwrap();
         let store = ShortcutSettingsStore::new(root.path().to_owned());
         let old = b"CONTROL+OPTION+KeyK\n";
@@ -861,12 +741,6 @@ mod tests {
         let custom = store.load().unwrap().unwrap();
         assert_eq!(custom.canonical(), "control+alt+KeyK");
         assert_eq!(fs::read(&store.settings_path).unwrap(), old);
-        assert_eq!(
-            store.persist_with_file_sync_failure(ShortcutBinding::OptionSpace),
-            Err(ShortcutPreferencesError::StorageUnavailable)
-        );
-        assert_eq!(fs::read(&store.settings_path).unwrap(), old);
-        assert_eq!(store.load(), Ok(Some(custom)));
         // Explicitly saving the custom choice canonicalizes only this requested commit, then remains reloadable.
         store.persist(custom).unwrap();
         assert_eq!(store.load(), Ok(Some(custom)));

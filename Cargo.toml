@@ -11,7 +11,7 @@ rust-version = "1.99"
 license = "MIT"
 
 [workspace.dependencies]
-omni-plugin-sdk = { git = "https://github.com/nilo-ggyt/omni-plugin-sdk.git", rev = "e50f3f379cdeb73522ab86b49539cfdcc66f17f9", version = "=3.0.0" }
+omni-plugin-sdk = { git = "https://github.com/nilo-ggyt/omni-plugin-sdk.git", rev = "3bcd9012c94f6cadaed4540d32d7157dbe641e79", version = "=3.0.0" }
 
 [profile.release]
 codegen-units = 1

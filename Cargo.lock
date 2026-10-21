@@ -188,7 +188,7 @@ dependencies = [
 [[package]]
 name = "harfrust"
 version = "0.14.0"
-source = "git+https://github.com/nilo-ggyt/omni-md.git?rev=f58c3e467559561a8d4c63332e14fe2c072d0f11#f58c3e467559561a8d4c63332e14fe2c072d0f11"
+source = "git+https://github.com/nilo-ggyt/omni-md.git?rev=476b7893573230277da3783d06f5bce7358b94e3#476b7893573230277da3783d06f5bce7358b94e3"
 dependencies = [
  "bitflags",
  "bytemuck",
@@ -353,7 +353,7 @@ version = "0.1.0"
 [[package]]
 name = "omni-markdown-core"
 version = "0.1.0"
-source = "git+https://github.com/nilo-ggyt/omni-md.git?rev=f58c3e467559561a8d4c63332e14fe2c072d0f11#f58c3e467559561a8d4c63332e14fe2c072d0f11"
+source = "git+https://github.com/nilo-ggyt/omni-md.git?rev=476b7893573230277da3783d06f5bce7358b94e3#476b7893573230277da3783d06f5bce7358b94e3"
 dependencies = [
  "harfrust",
  "libc",
@@ -373,7 +373,7 @@ dependencies = [
 [[package]]
 name = "omni-md-plugin"
 version = "0.1.0"
-source = "git+https://github.com/nilo-ggyt/omni-md.git?rev=f58c3e467559561a8d4c63332e14fe2c072d0f11#f58c3e467559561a8d4c63332e14fe2c072d0f11"
+source = "git+https://github.com/nilo-ggyt/omni-md.git?rev=476b7893573230277da3783d06f5bce7358b94e3#476b7893573230277da3783d06f5bce7358b94e3"
 dependencies = [
  "block2",
  "core-foundation",
@@ -417,7 +417,7 @@ dependencies = [
 [[package]]
 name = "omni-plugin-sdk"
 version = "3.0.0"
-source = "git+https://github.com/nilo-ggyt/omni-plugin-sdk.git?rev=e50f3f379cdeb73522ab86b49539cfdcc66f17f9#e50f3f379cdeb73522ab86b49539cfdcc66f17f9"
+source = "git+https://github.com/nilo-ggyt/omni-plugin-sdk.git?rev=3bcd9012c94f6cadaed4540d32d7157dbe641e79#3bcd9012c94f6cadaed4540d32d7157dbe641e79"
 dependencies = [
  "thiserror",
 ]
@@ -440,7 +440,7 @@ dependencies = [
 [[package]]
 name = "pulldown-cmark"
 version = "0.13.4"
-source = "git+https://github.com/nilo-ggyt/omni-md.git?rev=f58c3e467559561a8d4c63332e14fe2c072d0f11#f58c3e467559561a8d4c63332e14fe2c072d0f11"
+source = "git+https://github.com/nilo-ggyt/omni-md.git?rev=476b7893573230277da3783d06f5bce7358b94e3#476b7893573230277da3783d06f5bce7358b94e3"
 dependencies = [
  "bitflags",
  "memchr",

@@ -540,12 +540,6 @@ impl LauncherController {
         // Taking transfers the owned descriptor once and ends the borrow before activation can reenter.
         self.ivars().pending_action.borrow_mut().take()
     }
-
-    /// Inspect the model, rather than native visibility, when validating construction.
-    pub(super) fn result_count(&self) -> usize {
-        // This copied scalar neither reads AppKit nor exposes an interior result borrow.
-        self.ivars().results.borrow().len
-    }
 }
 
 /// A native event is authoritative only for the same currently active panel identity.

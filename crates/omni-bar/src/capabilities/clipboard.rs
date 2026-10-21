@@ -157,7 +157,7 @@ impl ClipboardClearSuppression {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ClipboardError {
     #[error("剪贴板历史文件不可用")]
-    Storage,
+    Storage(#[source] ClipboardHistoryFileError),
     #[error("找不到这条剪贴板记录")]
     EntryNotFound,
     #[error("剪贴板来源已改变，请重新打开面板")]
@@ -289,9 +289,10 @@ fn map_error(error: ClipboardHistoryFileError) -> ClipboardError {
     match error {
         // The selected row may disappear after a clear or a newer bounded history update.
         ClipboardHistoryFileError::EntryNotFound => ClipboardError::EntryNotFound,
-        // Paths, payloads and operating-system details stay out of the product message.
-        ClipboardHistoryFileError::StorageUnavailable(_)
-        | ClipboardHistoryFileError::InvalidFormat => ClipboardError::Storage,
+        // Keep the typed storage cause for the owning error boundary while Display remains the
+        // fixed Chinese message above. Losing the cause here would erase the actual failed I/O.
+        cause @ (ClipboardHistoryFileError::StorageUnavailable(_)
+        | ClipboardHistoryFileError::InvalidFormat) => ClipboardError::Storage(cause),
     }
 }
 
@@ -611,6 +612,36 @@ mod tests {
         // Invalid suffix units beyond the scalar prefix cannot change the bounded query.
         units.insert(0, b'a' as u16);
         assert_eq!(clipboard_query_prefix(&units), "a".repeat(128));
+    }
+
+    /// A real filesystem conflict keeps its diagnostic cause without exposing it to the user.
+    #[test]
+    fn failed_storage_activation_preserves_its_cause_and_existing_file() {
+        use std::error::Error;
+
+        // A regular file occupies the required private directory. This exercises actual production
+        // acquisition failure without injected I/O, permission changes, or access to a pasteboard.
+        let root = tempdir().unwrap();
+        let occupant = root.path().join("Clipboard");
+        std::fs::write(&occupant, b"preserve existing bytes").unwrap();
+        let session = ClipboardSession::new(
+            root.path().to_owned(),
+            generation("isolated-storage-failure", 1).source,
+            ClipboardClearSuppression::new(),
+        );
+        let error = session.begin().unwrap_err();
+        assert_eq!(error.to_string(), "剪贴板历史文件不可用");
+        let storage_cause = error.source().expect("original typed storage error");
+        assert!(
+            storage_cause
+                .source()
+                .and_then(|cause| cause.downcast_ref::<std::io::Error>())
+                .is_some()
+        );
+        assert_eq!(
+            std::fs::read(&occupant).unwrap(),
+            b"preserve existing bytes"
+        );
     }
 
     /// Result refresh preserves a valid target; explicit query edits and Home/End have their own baseline meanings.

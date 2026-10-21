@@ -1,22 +1,22 @@
-//! 在平台资源分配前区分正式启动、初始化检查和限时驻留采样，不持有 Native 对象或回调。
+//! Select production, smoke or bounded measurement before acquiring platform resources.
 
 use std::ffi::OsString;
 
 use crate::{run_application, run_benchmark_application, run_smoke_test};
 
-/// 参数拒绝与平台运行失败分开归类；携带原诊断，不把失败转成另一种启动模式。
+/// Distinguish rejected arguments from returned runtime failures without changing the requested mode.
 #[derive(Debug)]
 pub enum RuntimeCommandError {
     /// Invalid or ambiguous arguments rejected before native initialization.
     InvalidArguments(String),
-    /// 平台入口返回的初始化或运行失败；资源清理和原始原因仍由该入口负责。
+    /// Initialization or runtime failure returned after the platform boundary handled its owned resources.
     Runtime(String),
 }
 
 impl std::fmt::Display for RuntimeCommandError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            // 两类错误共享文字输出，但保留原 variant 给调用方区分是否已进入平台；这里不再重试。
+            // Preserve the category for callers while displaying its original bounded diagnostic; never retry here.
             Self::InvalidArguments(message) | Self::Runtime(message) => {
                 formatter.write_str(message)
             }
@@ -26,88 +26,88 @@ impl std::fmt::Display for RuntimeCommandError {
 
 impl std::error::Error for RuntimeCommandError {}
 
-/// 只分发已有命令；先检查该命令的参数，再进入唯一平台入口，避免错误输入先注册快捷键。
+/// Validate the selected command completely before platform initialization can register a shortcut.
 ///
 /// # Errors
-/// 参数编码、数量或采样时长不合法时返回 InvalidArguments；平台已执行后返回其 Runtime 原因。
+/// Return InvalidArguments for invalid encoding, arity or duration, or the actual Runtime failure.
 pub fn run_from_environment<I>(arguments: I) -> Result<(), RuntimeCommandError>
 where
     I: IntoIterator<Item = OsString>,
 {
-    // 入口按进程 argv 约定先消费程序名；保留 OsString 原字节，不能先有损转换再识别命令。
+    // Consume argv[0] and retain original OsString bytes until exact command decoding succeeds.
     let mut arguments = arguments.into_iter();
     let _program = arguments.next();
     let Some(command) = arguments.next() else {
-        // 没有命令才是正常驻留启动；不套用采样期限，也不分配合成验收控件。
+        // Only an absent command means normal residency, with no measurement deadline or synthetic controls.
         return run_application().map_err(RuntimeCommandError::Runtime);
     };
 
     match command.to_str() {
-        // smoke 只走平台的最小构造与状态转换检查，不把它当作用户笔记或完整资源验收。
+        // Smoke checks minimal native construction and transitions, without claiming complete product acceptance.
         Some("--smoke-test") => {
             if arguments.next().is_some() {
-                // 无参数命令不能忽略后续输入；在 AppKit 构造前完整拒绝本次请求。
+                // Reject excess arguments before any AppKit construction instead of silently ignoring them.
                 return Err(RuntimeCommandError::InvalidArguments(
                     "--smoke-test 不接受额外参数".to_owned(),
                 ));
             }
             run_smoke_test().map_err(RuntimeCommandError::Runtime)
         }
-        // 采样复用真实驻留初始化；先确定期限和唯一时长参数，再允许平台安排结束回调。
+        // Measurement uses real residency, but validates its sole deadline before scheduling shutdown.
         Some("--benchmark") => {
             let seconds = parse_benchmark_seconds(arguments.next())?;
             if arguments.next().is_some() {
-                // 时长合法也不能吞掉第二个参数；此处尚未启动事件循环或申请快捷键。
+                // A valid duration cannot authorize extra arguments; no event loop or shortcut exists yet.
                 return Err(RuntimeCommandError::InvalidArguments(
                     "--benchmark 仅接受一个时长参数".to_owned(),
                 ));
             }
             run_benchmark_application(seconds).map_err(RuntimeCommandError::Runtime)
         }
-        // 帮助只打印当前命令，不调用平台或持久化配置；不创建供采样用的空进程。
+        // Help writes usage only, without entering the platform or creating persistent configuration.
         Some("--help" | "-h") => {
             print_usage();
             Ok(())
         }
-        // 未知命令保留原文本用于定位错误，不猜近似选项或落回正式启动；尚无 Native 资源。
+        // Reject unknown text as supplied instead of guessing a command or falling through to production.
         Some(unknown) => Err(RuntimeCommandError::InvalidArguments(format!(
             "未知命令 {unknown:?}；请使用 --help 查看用法"
         ))),
-        // 命令字节不是 UTF-8 时明确拒绝，避免替换字符把不同输入映射成同一个受支持命令。
+        // Reject invalid UTF-8 rather than aliasing distinct command bytes through replacement characters.
         None => Err(RuntimeCommandError::InvalidArguments(
             "命令参数必须采用 UTF-8 编码".to_owned(),
         )),
     }
 }
 
-/// 将明确采样限制在 1 至 3600 秒；仅返回时长，不分配 timer、线程或应用 owner。
+/// Parse an explicit duration of 1 through 3600 seconds without acquiring timers or application state.
 fn parse_benchmark_seconds(argument: Option<OsString>) -> Result<u64, RuntimeCommandError> {
     let Some(argument) = argument else {
-        // 缺少时长是参数错误，不能把显式采样静默变成无限驻留的正式应用。
+        // A missing duration cannot turn explicit measurement into indefinite production residency.
         return Err(RuntimeCommandError::InvalidArguments(
             "--benchmark 需要以秒为单位的时长参数".to_owned(),
         ));
     };
-    // 编码和数值分别保留失败含义；验证完成前平台不会安排任何结束回调。
+    // Preserve distinct encoding and numeric failures before the platform schedules a shutdown callback.
     let value = argument.to_str().ok_or_else(|| {
-        // 非 UTF-8 的原字节不能经有损转换后重新尝试解析成数字。
+        // Invalid original bytes must not become a numeric argument through lossy conversion.
         RuntimeCommandError::InvalidArguments("采样时长必须是 UTF-8 编码的整数".to_owned())
     })?;
     let seconds = value.parse::<u64>().map_err(|_| {
-        // 负数、非整数和 u64 溢出均拒绝；不能截断或钳制成另一个有效采样期限。
+        // Reject negatives, non-integers and overflow instead of clamping them to a different deadline.
         RuntimeCommandError::InvalidArguments("采样时长必须是无符号整数".to_owned())
     })?;
     if seconds == 0 || seconds > 3_600 {
-        // 零不能代表无限等待；超过一小时也不代为缩短，调用方须明确给出可接受期限。
+        // Zero cannot mean infinite waiting; the caller must also explicitly choose a duration within one hour.
         return Err(RuntimeCommandError::InvalidArguments(
             "采样时长必须介于 1 至 3600 秒之间".to_owned(),
         ));
     }
-    // 到这里仅移交已检查的秒数；实际计时与正常保存、终止协议仍归平台。
+    // Transfer validated seconds only; the platform still owns timing, saving and ordinary termination.
     Ok(seconds)
 }
 
-/// 帮助与上面的命令集合对应，只写标准输出，不初始化原生运行时或读取用户数据。
+/// Describe exactly the accepted commands without initializing AppKit or reading user data.
 fn print_usage() {
     println!("用法：omni-native-runtime [选项]");
     println!("  --help, -h             显示帮助");
@@ -119,14 +119,14 @@ fn print_usage() {
 mod tests {
     use super::*;
 
-    /// 直接验证期限与多余参数的业务拒绝，不以实际等待或 AppKit 初始化替代参数检查。
+    /// Verify invalid durations and excess arguments without substituting waiting or native initialization.
     #[test]
     fn measurement_arguments_are_bounded_before_native_initialization() {
-        // 非法数值覆盖零、负数、超期、非整数和溢出；普通测试线程不进入 AppKit。
+        // Exercise invalid numeric input directly; ordinary test threads must never initialize AppKit.
         for input in ["0", "-1", "3601", "invalid", "18446744073709551616"] {
             assert!(parse_benchmark_seconds(Some(input.into())).is_err());
         }
-        // 缺失与合法上下界分别验证，避免拒绝非法值的同时误伤明确的采样请求。
+        // Preserve valid endpoints as well as missing-input rejection for explicit measurement requests.
         assert!(parse_benchmark_seconds(None).is_err());
         assert_eq!(parse_benchmark_seconds(Some("1".into())).unwrap(), 1);
         assert_eq!(parse_benchmark_seconds(Some("3600".into())).unwrap(), 3600);
