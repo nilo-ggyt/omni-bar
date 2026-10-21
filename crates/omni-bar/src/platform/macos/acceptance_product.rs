@@ -1,6 +1,7 @@
 //! 真实Host完整执行长文、巨段落、源模式与资源场景，最终观察5秒空前台驻留。
 //! 本入口只持合成路径、标量和原生弱证据；功能、保存、SDK回执与真实释放分别决定结果。
 
+mod external_http;
 mod readiness;
 
 use std::cell::{Cell, RefCell};
@@ -71,6 +72,16 @@ const TABLE_CASES: [NativeMarkdownHostedTableCase; 8] = [
     NativeMarkdownHostedTableCase::ToolbarFieldHistory,
     NativeMarkdownHostedTableCase::FindReplacementComposition,
 ];
+
+/// 独立对照与同进程完整验收共用原 Driver；模式只决定何时接原步骤表，不改变产品交互。
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Workload {
+    Full,
+    SystemIme,
+    /// 不打开浏览器的新页面；原八个文稿、表格、资源和中文流程仍完整串接。
+    CoreUi,
+    CompleteUi,
+}
 
 /// Host只接各插件工作负载拥有的具名动作；不会把外部整数解释成任意产品操作。
 #[derive(Clone, Copy)]
@@ -243,13 +254,52 @@ struct Driver {
     verified_table_cases: usize,
     verified_resource_cases: usize,
     first_failure: Option<String>,
-    // 中文系统验收另开全新进程，但仍复用本组合根、窗口、SDK 和唯一应用事件循环。
-    system_ime_only: bool,
+    // 两种串接验收都不重建 Driver/PID/origin；只有原完整流程的驻留终点才允许追加中文会话。
+    workload: Workload,
+    full_idle_verified: bool,
     ime: Option<Rc<NativeMarkdownHostedImeProbe>>,
     ime_verified: bool,
+    /// 只有CompleteUi第八个文稿流程创建；原Full/SystemIme完全不取得监听器或浏览器资源。
+    external_http: Option<external_http::ExternalHttp>,
+    external_http_verified: bool,
 }
 
 impl Driver {
+    /// 每个数量只在原 Native/SDK 关闭核验后增加；完整编辑次数仍由原末步保存验证授予。
+    fn full_workload_verified(&self) -> bool {
+        self.completed_documents == DOCUMENT_FLOWS.len()
+            && self.verified_editing_flows == CYCLES + 1
+            && self.verified_table_cases == TABLE_CASES.len()
+            && self.verified_resource_cases == RESOURCE_CASES.len()
+    }
+
+    /// 专项保持原入口；追加会话只能在完整流程和第一段原五秒驻留均成功后取得步骤权限。
+    fn current_ime(&self) -> bool {
+        match self.workload {
+            Workload::Full => false,
+            Workload::SystemIme => true,
+            Workload::CoreUi | Workload::CompleteUi => {
+                self.full_idle_verified && self.full_workload_verified() && !self.ime_verified
+            }
+        }
+    }
+
+    /// 串接验收第一次关闭进入原驻留，中文结束后才进入最终驻留；中间必须新走正式 Launcher。
+    fn closes_final_launcher(&self) -> bool {
+        match self.workload {
+            Workload::SystemIme => self.ime_verified,
+            Workload::Full | Workload::CoreUi | Workload::CompleteUi => {
+                let cases_closed = self.completed_documents == DOCUMENT_FLOWS.len()
+                    && self.verified_table_cases == TABLE_CASES.len()
+                    && self.verified_resource_cases == RESOURCE_CASES.len();
+                cases_closed
+                    && (self.workload == Workload::Full
+                        || !self.full_idle_verified
+                        || self.ime_verified)
+            }
+        }
+    }
+
     /// 只有插件原步骤表的最后一步通过才允许正常关闭；特殊流程的末步本身已发正式返回。
     fn accept_verified_workload(
         &mut self,
@@ -286,15 +336,26 @@ impl Driver {
 
     /// 当前流程只由已完成且释放的文稿数量选择，外来事件不能自行指定工作负载或步骤。
     fn current_flow(&self) -> Option<NativeMarkdownHostedFlow> {
-        if self.system_ime_only {
+        if self.workload == Workload::SystemIme {
             return None;
         }
-        DOCUMENT_FLOWS.get(self.completed_documents).copied()
+        DOCUMENT_FLOWS
+            .get(self.completed_documents)
+            .copied()
+            .map(|flow| {
+                if self.workload == Workload::CompleteUi
+                    && flow == NativeMarkdownHostedFlow::SourceRelativeLink
+                {
+                    NativeMarkdownHostedFlow::SourceRelativeLinkHttp
+                } else {
+                    flow
+                }
+            })
     }
 
     /// 表格只能在全部文稿流程释放后开始，当前case索引不能由Native回调修改。
     fn current_table_case(&self) -> Option<NativeMarkdownHostedTableCase> {
-        if self.system_ime_only {
+        if self.workload == Workload::SystemIme {
             return None;
         }
         (self.completed_documents == DOCUMENT_FLOWS.len())
@@ -304,7 +365,7 @@ impl Driver {
 
     /// 步骤长度来自插件的单一原表；Host只据此核队列索引与末动作，不复制功能契约。
     fn current_step_count(&self) -> Option<usize> {
-        if self.system_ime_only {
+        if self.current_ime() {
             return Some(NativeMarkdownHostedImeStep::ALL.len());
         }
         self.current_flow()
@@ -314,7 +375,7 @@ impl Driver {
 
     /// 仅从插件拥有的当前具名步骤表取动作，不转换任意selector或重新发现文稿。
     fn current_step(&self, index: usize) -> Option<WorkloadStep> {
-        if self.system_ime_only {
+        if self.current_ime() {
             return NativeMarkdownHostedImeStep::ALL
                 .get(index)
                 .copied()
@@ -674,7 +735,20 @@ fn schedule_hosted_step(index: usize) -> Result<(), String> {
             if !current {
                 return; // 已有真实终点、取消、关闭或新会话时，旧失败通知没有读取后继图的权限。
             }
-            if let WorkloadStep::Document(step) = step
+            if matches!(
+                step,
+                WorkloadStep::Document(NativeMarkdownHostedStep::VerifyRelativeLinkHttpUnchanged)
+            ) {
+                // HTTP只等独占服务器的真实GET/pagehide；原相对链接源Body已经释放，不能拿它定位网络等待。
+                DRIVER.with_borrow(|slot| {
+                    if let Some(server) = slot
+                        .as_ref()
+                        .and_then(|driver| driver.external_http.as_ref())
+                    {
+                        server.diagnose_deadline();
+                    }
+                });
+            } else if let WorkloadStep::Document(step) = step
                 && let Ok(bridge) = hosted()
             {
                 bridge.diagnose_deadline(step); // 只读原票有限诊断，不推进执行器或签另一份Ready。
@@ -683,6 +757,15 @@ fn schedule_hosted_step(index: usize) -> Result<(), String> {
         })
         .map_err(|_| "原步骤失败通知无法调度".to_owned())?;
     let terminal = match step {
+        WorkloadStep::Document(NativeMarkdownHostedStep::VerifyRelativeLinkHttpUnchanged) => {
+            // 真实网络终点先到也保存在该唯一server；只在原Driver信号登记后消费，不另开轮询。
+            DRIVER.with_borrow(|slot| {
+                slot.as_ref()
+                    .and_then(|driver| driver.external_http.as_ref())
+                    .ok_or("HTTP终点缺少原服务器")?
+                    .observe(signal)
+            })?
+        }
         WorkloadStep::Document(step) => {
             hosted()?.observe_step_terminal(step, move || hosted_step_terminal(signal))?
         }
@@ -745,15 +828,16 @@ fn ime() -> Result<Rc<NativeMarkdownHostedImeProbe>, String> {
         .ok_or_else(|| "原中文输入法观察桥缺失".to_owned())
 }
 
-fn system_ime_only() -> bool {
-    DRIVER.with_borrow(|slot| slot.as_ref().is_some_and(|driver| driver.system_ime_only))
+/// 只观察原 Driver 已授予的当前步骤类别；完整模式不能在第一段驻留完成前偷跑输入法。
+fn ime_workload() -> bool {
+    DRIVER.with_borrow(|slot| slot.as_ref().is_some_and(Driver::current_ime))
 }
 
 /// 所有长文与源模式流程完成后才选择资源场景，缺少当前场景不能冒充全部通过。
 fn resource_case() -> Option<NativeMarkdownHostedResourceCase> {
     DRIVER.with_borrow(|slot| {
         let driver = slot.as_ref()?;
-        if driver.system_ime_only {
+        if driver.workload == Workload::SystemIme {
             return None;
         }
         (driver.completed_documents == DOCUMENT_FLOWS.len()
@@ -804,11 +888,12 @@ fn reset_owned_workspace(workspace: &Path) -> Result<(), String> {
 
 /// 夹具仍按8KiB以内块写磁盘；巨段落从不在Host构造完整String。
 fn prepare_document_fixture() -> Result<(), String> {
-    let (workspace, giant) = DRIVER.with_borrow(|slot| {
+    let (workspace, giant, http) = DRIVER.with_borrow(|slot| {
         let driver = slot.as_ref().ok_or("原长文driver缺失")?;
         Ok::<_, String>((
             driver.root.join("workspace"),
             driver.completed_documents == CYCLES,
+            driver.current_flow() == Some(NativeMarkdownHostedFlow::SourceRelativeLinkHttp),
         ))
     })?;
     reset_owned_workspace(&workspace)?;
@@ -818,7 +903,19 @@ fn prepare_document_fixture() -> Result<(), String> {
     } else {
         omni_md_plugin::write_native_markdown_memory_fixture(&path)
     }
-    .map_err(|_| "流式合成文稿生成失败".to_owned())
+    .map_err(|_| "流式合成文稿生成失败".to_owned())?;
+    if http {
+        let mut server = Some(external_http::ExternalHttp::new()?);
+        DRIVER.with_borrow_mut(|slot| {
+            let driver = slot.as_mut().ok_or("HTTP夹具原driver已结束")?;
+            if driver.external_http.is_some() || driver.external_http_verified {
+                return Err("HTTP夹具不得重复创建或接管已完成交接".to_owned());
+            }
+            driver.external_http = server.take();
+            Ok(())
+        })?; // 未交接的server在TLS借用结束后由本地唯一owner取消/join。
+    }
+    Ok(())
 }
 
 /// 样本文字由插件原用例唯一拥有；Host只在已释放的独占目录创建所需文件。
@@ -886,7 +983,7 @@ fn request_return() -> Result<(), String> {
     emit("plugin_return_requested");
     if table_case().is_some() {
         table()?.request_return(false)
-    } else if system_ime_only() {
+    } else if ime_workload() {
         ime()?.request_return()
     } else {
         hosted()?.request_return()
@@ -931,12 +1028,7 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
             emit("launcher_ready visible=true input_ready=true sdk_session_owned=false");
             let final_close = DRIVER.with_borrow(|slot| {
                 slot.as_ref().is_some_and(|driver| {
-                    (driver.system_ime_only && driver.ime_verified)
-                        || (!driver.system_ime_only
-                            && driver.completed_documents == DOCUMENT_FLOWS.len()
-                            && driver.verified_table_cases == TABLE_CASES.len()
-                            && driver.verified_resource_cases == RESOURCE_CASES.len())
-                        || driver.first_failure.is_some()
+                    driver.closes_final_launcher() || driver.first_failure.is_some()
                 })
             });
             // 每次返回都重新核验真实Launcher就绪，再决定开始下一轮或结束最终前台。
@@ -946,7 +1038,7 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
             if !foreground_is_empty() {
                 return Err("原 Launcher 未完全释放，禁止插件激活".to_owned());
             }
-            if system_ime_only() {
+            if ime_workload() {
                 let workspace = DRIVER
                     .with_borrow(|slot| slot.as_ref().map(|driver| driver.root.join("workspace")))
                     .ok_or("原中文验收目录缺失")?;
@@ -995,7 +1087,7 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
             enqueue(Stage::ObservePlugin)?;
         }
         (Stage::ObservePlugin, Phase::ObservePlugin) => {
-            if system_ime_only() {
+            if ime_workload() {
                 let path = DRIVER
                     .with_borrow(|slot| {
                         slot.as_ref()
@@ -1053,10 +1145,19 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                         .map(|driver| driver.root.join("workspace/Acceptance.md"))
                 })
                 .ok_or("合成文档路径权限缺失")?;
-            let bridge = NativeMarkdownHostedWorkload::observe_active_document(
-                &path,
-                hosted_flow().ok_or("原长文流程缺失")?,
-            )?;
+            let flow = hosted_flow().ok_or("原长文流程缺失")?;
+            let bridge = if flow == NativeMarkdownHostedFlow::SourceRelativeLinkHttp {
+                let url = DRIVER
+                    .with_borrow(|slot| {
+                        slot.as_ref()
+                            .and_then(|driver| driver.external_http.as_ref())
+                            .map(|server| server.url().to_owned())
+                    })
+                    .ok_or("HTTP流程没有原监听器URL")?;
+                NativeMarkdownHostedWorkload::observe_active_document_with_http_link(&path, &url)?
+            } else {
+                NativeMarkdownHostedWorkload::observe_active_document(&path, flow)?
+            };
             DRIVER.with_borrow_mut(|slot| {
                 if let Some(driver) = slot.as_mut() {
                     driver.hosted = Some(Rc::new(bridge));
@@ -1072,6 +1173,18 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                 .with_borrow(|slot| slot.as_ref()?.current_step_count())
                 .ok_or("原工作负载已结束")?;
             let closes_surface = step.closes_surface();
+            if matches!(
+                step,
+                WorkloadStep::Document(NativeMarkdownHostedStep::RelativeLinkHttpMouseUp)
+            ) {
+                // 先消费唯一网络动作登记，再让原正文投递Command鼠标；浏览器导航不可盲目重试。
+                DRIVER.with_borrow(|slot| {
+                    slot.as_ref()
+                        .and_then(|driver| driver.external_http.as_ref())
+                        .ok_or("HTTP点击缺少原服务器")?
+                        .arm()
+                })?;
+            }
             if closes_surface {
                 // 四种特殊流程的最后一步在原同步栈发返回；必须在调用前固定真实Host关闭权限。
                 begin_plugin_close_observation(PluginCloseIntent::ExitToLauncher)?;
@@ -1080,6 +1193,36 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                 WorkloadStep::Document(step) => hosted()?.step(step)?,
                 WorkloadStep::Table(step) => table()?.step(step)?,
                 WorkloadStep::Ime(step) => ime()?.step(step)?,
+            }
+            if matches!(
+                step,
+                WorkloadStep::Document(NativeMarkdownHostedStep::VerifyRelativeLinkHttpUnchanged)
+            ) {
+                // MD先核原Input/Source/磁盘/历史，Host再核真正HTTP终态；两个结果不能互相替代。
+                let mut server = DRIVER
+                    .with_borrow_mut(|slot| {
+                        slot.as_mut().and_then(|driver| driver.external_http.take())
+                    })
+                    .ok_or("HTTP核验缺少原服务器owner")?;
+                let verified = server.verify();
+                let released = server.shutdown();
+                match (verified, released) {
+                    (Err(primary), Err(cleanup)) => {
+                        return Err(format!("{primary}；HTTP释放失败：{cleanup}"));
+                    }
+                    (Err(primary), Ok(())) => return Err(primary),
+                    (Ok(()), Err(cleanup)) => return Err(cleanup),
+                    (Ok(()), Ok(())) => {}
+                }
+                DRIVER.with_borrow_mut(|slot| {
+                    slot.as_mut()
+                        .ok_or("HTTP完成后原driver缺失")?
+                        .external_http_verified = true;
+                    Ok::<_, String>(())
+                })?;
+                emit(
+                    "external_http_verified actual_nonce_get=true standard_self_close_requested=true trusted_pagehide=true persisted=false listener_closed=true worker_joined=true https_verified=false browser_internal_cleanup_verified=false",
+                );
             }
             if index + 1 == steps {
                 DRIVER.with_borrow_mut(|slot| {
@@ -1179,7 +1322,7 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                 resume_launcher_after_release()?;
                 return Ok(StageOutcome::Completed);
             }
-            if system_ime_only() {
+            if ime_workload() {
                 let cleanup_only = DRIVER.with_borrow(|slot| {
                     slot.as_ref()
                         .is_some_and(|driver| driver.first_failure.is_some())
@@ -1315,13 +1458,35 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
             if !foreground_is_empty() {
                 return Err("最终驻留窗口内出现新的业务 owner".to_owned());
             }
-            DRIVER.with_borrow_mut(|slot| {
-                if let Some(driver) = slot.as_mut() {
+            let append_ime = DRIVER.with_borrow_mut(|slot| {
+                let driver = slot.as_mut().ok_or("原驻留 driver 缺失")?;
+                if matches!(driver.workload, Workload::CoreUi | Workload::CompleteUi)
+                    && !driver.full_idle_verified
+                {
+                    // 第一段五秒原事件已真正到达；原计数来自各自 SDK/Native 关闭，而非计划数量。
+                    // 此处只接续同一个进程，不重置 origin、峰值采样、夹具或全局快捷键生命周期。
+                    if !driver.full_workload_verified() || driver.first_failure.is_some() {
+                        return Err("完整流程或其原驻留尚未通过，不能追加中文验收".to_owned());
+                    }
+                    driver.full_idle_verified = true;
+                    driver.phase = Phase::LauncherReady;
+                    Ok(true)
+                } else {
                     driver.phase = Phase::Finished;
+                    Ok(false)
                 }
-            });
+            })?;
             emit("resident_idle_completed seconds=5 foreground_empty=true");
-            stop_loop();
+            if append_ime {
+                emit(
+                    "full_ui_flows_verified repeat_cycles=3 document_flows=8 table_cases=8 resource_cases=9 idle_seconds=5 same_process=true",
+                );
+                // 原前台已为空且原 Launcher 弱证据已归还；正式显示新 Launcher，再经原目录激活。
+                // 不在这里直接创建 Markdown 会话或更改输入法，也不嵌套另一事件循环。
+                resume_launcher_after_release()?;
+            } else {
+                stop_loop();
+            }
         }
         _ => return Err("整产品事件与当前阶段不一致".to_owned()),
     }
@@ -1697,16 +1862,37 @@ fn stop_loop() {
 ///
 /// 非主线程、已有前台、目录非空及Native、步骤、保存、释放错误均明确失败，清理不抹掉首错。
 pub fn run_native_product_acceptance(root: &Path, shortcut: &str) -> Result<(), String> {
-    run_product(root, shortcut, false)
+    run_product(root, shortcut, Workload::Full)
 }
 
 /// 真实中文候选专项仍沿正式组合根运行；不得嵌套事件循环或复用本人正在编辑的输入客户。
 pub fn run_native_product_ime_acceptance(root: &Path, shortcut: &str) -> Result<(), String> {
-    run_product(root, shortcut, true)
+    run_product(root, shortcut, Workload::SystemIme)
 }
 
-/// 两种工作负载共享唯一装配和资源收尾；专项不会减少完整整产品工作负载的任何步骤。
-fn run_product(root: &Path, shortcut: &str, system_ime_only: bool) -> Result<(), String> {
+/// 在同一 Driver、夹具和进程中完整执行原编辑流程与中文候选专项，不创建外部浏览器页面。
+/// 外链有独立真实交付和页面清理边界；此入口的成功不能替代 CompleteUi 的 HTTP 门。
+///
+/// # Errors
+/// 原功能、保存、系统输入、资源归还或两段驻留任一失败，均保留原首错。
+pub fn run_native_product_core_ui_acceptance(root: &Path, shortcut: &str) -> Result<(), String> {
+    run_product(root, shortcut, Workload::CoreUi)
+}
+
+/// 完整 UI 在同 PID 先执行原全部流程与五秒驻留，再执行真实中文八步和最终五秒驻留。
+/// 两段复用原应用组合根和独占夹具；不能把独立运行的最低峰值拼成整产品通过。
+///
+/// # Errors
+/// 任一原功能、保存、系统输入、资源归还或驻留终点失败，均按同一 Driver 保留原首错。
+pub fn run_native_product_complete_ui_acceptance(
+    root: &Path,
+    shortcut: &str,
+) -> Result<(), String> {
+    run_product(root, shortcut, Workload::CompleteUi)
+}
+
+/// 独立与串接验收共用唯一装配和资源收尾；独立对照保持原步骤，串接不重复启动应用。
+fn run_product(root: &Path, shortcut: &str, workload: Workload) -> Result<(), String> {
     let configured_shortcut = ShortcutBinding::parse(shortcut)
         .map_err(|_| "整产品验收必须使用明确有效的既有启动器快捷键".to_owned())?;
     MainThreadMarker::new().ok_or("整产品验收需要真实 AppKit 主线程")?;
@@ -1773,36 +1959,58 @@ fn run_product(root: &Path, shortcut: &str, system_ime_only: bool) -> Result<(),
             verified_table_cases: 0,
             verified_resource_cases: 0,
             first_failure: None,
-            system_ime_only,
+            workload,
+            full_idle_verified: false,
             ime: None,
             ime_verified: false,
+            external_http: None,
+            external_http_verified: false,
         });
     });
-    if system_ime_only {
-        emit(
+    match workload {
+        Workload::SystemIme => emit(
             "configured workload=system_ime actual_input_source=true input_source_selected=false physical_keyboard=false memory_budget_pass=unmeasured",
-        );
-    } else {
-        emit(
+        ),
+        Workload::Full => emit(
             "configured repeat_cycles_planned=3 document_flows_planned=8 full_steps_per_flow=45 table_cases_planned=8 resource_cases_planned=9 input=programmatic_native_actions editing_verified=false memory_budget_pass=unmeasured",
-        );
+        ),
+        Workload::CoreUi => emit(
+            "configured workload=core_ui external_http_handoff_planned=false repeat_cycles_planned=3 document_flows_planned=8 full_steps_per_flow=45 table_cases_planned=8 resource_cases_planned=9 system_ime_steps_planned=8 full_idle_seconds=5 final_idle_seconds=5 same_process=true actual_input_source=true input_source_selected=false physical_keyboard=false editing_verified=false memory_budget_pass=unmeasured",
+        ),
+        Workload::CompleteUi => emit(
+            "configured workload=complete_ui external_http_handoff_planned=true repeat_cycles_planned=3 document_flows_planned=8 full_steps_per_flow=45 table_cases_planned=8 resource_cases_planned=9 system_ime_steps_planned=8 full_idle_seconds=5 final_idle_seconds=5 same_process=true actual_input_source=true input_source_selected=false physical_keyboard=false editing_verified=false memory_budget_pass=unmeasured",
+        ),
     }
     let result = super::run_application();
     // 正式run_application在停止时注销热键；仍独立核验实际空前台和注册已归还，不从代码路径推定释放。
     let released = foreground_is_empty() && super::shortcuts::product_probe_registration_released();
     drop(fixture);
-    let state = DRIVER.take().ok_or("整产品 driver 提前丢失")?;
-    result?;
-    if let Some(error) = state.first_failure {
-        return Err(error); // 清理成功不能抹掉此前渲染或Find步骤的真实失败。
+    let mut state = DRIVER.take().ok_or("整产品 driver 提前丢失")?;
+    let http_cleanup = state
+        .external_http
+        .take()
+        .map_or(Ok(()), |mut server| server.shutdown());
+    // 任一普通错误也显式结束唯一网络owner；保持原首错，不能用资源归还洗白功能失败。
+    let failure = result.err().or_else(|| state.first_failure.take());
+    match (failure, http_cleanup) {
+        (Some(primary), Err(cleanup)) => return Err(format!("{primary}；HTTP释放失败：{cleanup}")),
+        (Some(primary), Ok(())) => return Err(primary),
+        (None, Err(cleanup)) => return Err(cleanup),
+        (None, Ok(())) => {}
     }
-    let workload_passed = if system_ime_only {
-        state.ime_verified
-    } else {
-        state.completed_documents == DOCUMENT_FLOWS.len()
-            && state.verified_editing_flows == CYCLES + 1
-            && state.verified_table_cases == TABLE_CASES.len()
-            && state.verified_resource_cases == RESOURCE_CASES.len()
+    let workload_passed = match workload {
+        Workload::SystemIme => state.ime_verified,
+        Workload::Full => state.full_workload_verified(),
+        Workload::CoreUi => {
+            // 完整性沿用各原步骤的真实终点；没有浏览器回执时明确只证明编辑与输入部分。
+            state.full_workload_verified() && state.full_idle_verified && state.ime_verified
+        }
+        Workload::CompleteUi => {
+            state.full_workload_verified()
+                && state.full_idle_verified
+                && state.ime_verified
+                && state.external_http_verified
+        }
     };
     if state.phase != Phase::Finished
         || !workload_passed
@@ -1812,17 +2020,23 @@ fn run_product(root: &Path, shortcut: &str, system_ime_only: bool) -> Result<(),
         || state.table.is_some()
         || state.ime.is_some()
         || state.step_terminal.is_some()
+        || state.external_http.is_some()
     {
         return Err("整产品循环缺失终点、真实前台释放或热键注销证据".to_owned());
     }
-    if system_ime_only {
-        println!(
+    match workload {
+        Workload::SystemIme => println!(
             "product_acceptance event=system_ime_finished actual_han=true visible_candidate_near_caret=true undo_redo_restore=true saved=true viewport_lazy=true foreground_empty=true sdk_session_owned=false global_key_owner_released=true fixture_cleared=true physical_keyboard=false memory_budget_pass=unmeasured"
-        );
-    } else {
-        println!(
+        ),
+        Workload::Full => println!(
             "product_acceptance event=finished repeat_cycles=3 document_flows=8 full_editing_flows=4 table_cases=8 resource_cases=9 foreground_empty=true sdk_session_owned=false global_key_owner_released=true fixture_cleared=true editing_verified=true memory_budget_pass=unmeasured"
-        );
+        ),
+        Workload::CoreUi => println!(
+            "product_acceptance event=finished workload=core_ui external_http_verified=not_run browser_internal_cleanup_verified=false repeat_cycles=3 document_flows=8 full_editing_flows=4 table_cases=8 resource_cases=9 system_ime_steps=8 full_idle_seconds=5 final_idle_seconds=5 same_process=true actual_han=true visible_candidate_near_caret=true undo_redo_restore=true saved=true viewport_lazy=true foreground_empty=true sdk_session_owned=false global_key_owner_released=true fixture_cleared=true physical_keyboard=false editing_verified=true memory_budget_pass=unmeasured"
+        ),
+        Workload::CompleteUi => println!(
+            "product_acceptance event=finished workload=complete_ui external_http_verified=true https_verified=false browser_internal_cleanup_verified=false repeat_cycles=3 document_flows=8 full_editing_flows=4 table_cases=8 resource_cases=9 system_ime_steps=8 full_idle_seconds=5 final_idle_seconds=5 same_process=true actual_han=true visible_candidate_near_caret=true undo_redo_restore=true saved=true viewport_lazy=true foreground_empty=true sdk_session_owned=false global_key_owner_released=true fixture_cleared=true physical_keyboard=false editing_verified=true memory_budget_pass=unmeasured"
+        ),
     }
     Ok(())
 }

@@ -9,15 +9,30 @@ fn main() -> Result<(), String> {
         let mut arguments = std::env::args_os().skip(1);
         if arguments.next().as_deref() != Some(std::ffi::OsStr::new("--launcher-shortcut")) {
             return Err(
-                "用法：product_acceptance --launcher-shortcut 本机既有启动器快捷键".to_owned(),
+                "用法：product_acceptance --launcher-shortcut 本机既有启动器快捷键 [--system-ime|--core-ui|--complete-ui]".to_owned(),
             );
         }
         let shortcut = arguments.next().ok_or("缺少既有启动器快捷键")?;
         let shortcut = shortcut.to_str().ok_or("启动器快捷键必须使用有效UTF-8")?;
-        let system_ime = match arguments.next().as_deref() {
-            None => false,
-            Some(value) if value == std::ffi::OsStr::new("--system-ime") => true,
-            Some(_) => return Err("只接受已声明的系统中文输入法专项参数".to_owned()),
+        // 入口分别保留原完整流程、原中文专项及同 PID 串接；这里只选择已有真实组合根，
+        // 不在 example 复制工作负载步骤、创建第二个 Driver 或拼接不同进程的内存结果。
+        let run: fn(&std::path::Path, &str) -> Result<(), String> = match arguments
+            .next()
+            .as_deref()
+        {
+            None => omni_native_runtime::run_native_product_acceptance,
+            Some(value) if value == std::ffi::OsStr::new("--system-ime") => {
+                omni_native_runtime::run_native_product_ime_acceptance
+            }
+            Some(value) if value == std::ffi::OsStr::new("--complete-ui") => {
+                omni_native_runtime::run_native_product_complete_ui_acceptance
+            }
+            Some(value) if value == std::ffi::OsStr::new("--core-ui") => {
+                omni_native_runtime::run_native_product_core_ui_acceptance
+            }
+            Some(_) => {
+                return Err("只接受 --system-ime、--core-ui 或 --complete-ui 验收参数".to_owned());
+            }
         };
         if arguments.next().is_some() {
             return Err("整产品验收不接受其他快捷键或未声明参数".to_owned()); // 不偷偷增加备用唤出键。
@@ -28,11 +43,7 @@ fn main() -> Result<(), String> {
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir()
             .map_err(|_| "无法创建整产品合成验收目录".to_owned())?;
-        if system_ime {
-            omni_native_runtime::run_native_product_ime_acceptance(root.path(), shortcut)
-        } else {
-            omni_native_runtime::run_native_product_acceptance(root.path(), shortcut)
-        }
+        run(root.path(), shortcut)
     }
     #[cfg(not(target_os = "macos"))]
     {

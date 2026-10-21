@@ -27,7 +27,8 @@ pub use platform::macos::acceptance_fixture::{
 };
 #[cfg(all(target_os = "macos", feature = "native-product-acceptance"))]
 pub use platform::macos::acceptance_product::{
-    run_native_product_acceptance, run_native_product_ime_acceptance,
+    run_native_product_acceptance, run_native_product_complete_ui_acceptance,
+    run_native_product_core_ui_acceptance, run_native_product_ime_acceptance,
 };
 #[cfg(all(target_os = "macos", feature = "native-acceptance"))]
 pub use platform::macos::acceptance_termination::{
