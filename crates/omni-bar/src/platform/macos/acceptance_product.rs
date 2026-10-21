@@ -261,7 +261,7 @@ struct Driver {
     ime_verified: bool,
     /// 只有CompleteUi第八个文稿流程创建；原Full/SystemIme完全不取得监听器或浏览器资源。
     external_http: Option<external_http::ExternalHttp>,
-    external_http_verified: bool,
+    external_http_handoff_verified: bool,
 }
 
 impl Driver {
@@ -739,7 +739,7 @@ fn schedule_hosted_step(index: usize) -> Result<(), String> {
                 step,
                 WorkloadStep::Document(NativeMarkdownHostedStep::VerifyRelativeLinkHttpUnchanged)
             ) {
-                // HTTP只等独占服务器的真实GET/pagehide；原相对链接源Body已经释放，不能拿它定位网络等待。
+                // HTTP只等独占服务器的真实GET与响应写完；原相对链接源Body已经释放，不能拿它定位网络等待。
                 DRIVER.with_borrow(|slot| {
                     if let Some(server) = slot
                         .as_ref()
@@ -908,7 +908,7 @@ fn prepare_document_fixture() -> Result<(), String> {
         let mut server = Some(external_http::ExternalHttp::new()?);
         DRIVER.with_borrow_mut(|slot| {
             let driver = slot.as_mut().ok_or("HTTP夹具原driver已结束")?;
-            if driver.external_http.is_some() || driver.external_http_verified {
+            if driver.external_http.is_some() || driver.external_http_handoff_verified {
                 return Err("HTTP夹具不得重复创建或接管已完成交接".to_owned());
             }
             driver.external_http = server.take();
@@ -1217,11 +1217,11 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                 DRIVER.with_borrow_mut(|slot| {
                     slot.as_mut()
                         .ok_or("HTTP完成后原driver缺失")?
-                        .external_http_verified = true;
+                        .external_http_handoff_verified = true;
                     Ok::<_, String>(())
                 })?;
                 emit(
-                    "external_http_verified actual_nonce_get=true standard_self_close_requested=true trusted_pagehide=true persisted=false listener_closed=true worker_joined=true https_verified=false browser_internal_cleanup_verified=false",
+                    "external_http_handoff_verified actual_nonce_get=true response_status=204 response_write_complete=true listener_closed=true worker_joined=true https_verified=false browser_tab_cleanup=unverified browser_history_cleanup=unverified",
                 );
             }
             if index + 1 == steps {
@@ -1871,7 +1871,7 @@ pub fn run_native_product_ime_acceptance(root: &Path, shortcut: &str) -> Result<
 }
 
 /// 在同一 Driver、夹具和进程中完整执行原编辑流程与中文候选专项，不创建外部浏览器页面。
-/// 外链有独立真实交付和页面清理边界；此入口的成功不能替代 CompleteUi 的 HTTP 门。
+/// 外链有独立真实交付边界；此入口的成功不能替代 CompleteUi 的 HTTP 门。
 ///
 /// # Errors
 /// 原功能、保存、系统输入、资源归还或两段驻留任一失败，均保留原首错。
@@ -1964,7 +1964,7 @@ fn run_product(root: &Path, shortcut: &str, workload: Workload) -> Result<(), St
             ime: None,
             ime_verified: false,
             external_http: None,
-            external_http_verified: false,
+            external_http_handoff_verified: false,
         });
     });
     match workload {
@@ -2002,14 +2002,14 @@ fn run_product(root: &Path, shortcut: &str, workload: Workload) -> Result<(), St
         Workload::SystemIme => state.ime_verified,
         Workload::Full => state.full_workload_verified(),
         Workload::CoreUi => {
-            // 完整性沿用各原步骤的真实终点；没有浏览器回执时明确只证明编辑与输入部分。
+            // 完整性沿用各原步骤的真实终点；未执行真实HTTP交付时明确只证明编辑与输入部分。
             state.full_workload_verified() && state.full_idle_verified && state.ime_verified
         }
         Workload::CompleteUi => {
             state.full_workload_verified()
                 && state.full_idle_verified
                 && state.ime_verified
-                && state.external_http_verified
+                && state.external_http_handoff_verified
         }
     };
     if state.phase != Phase::Finished
@@ -2032,10 +2032,10 @@ fn run_product(root: &Path, shortcut: &str, workload: Workload) -> Result<(), St
             "product_acceptance event=finished repeat_cycles=3 document_flows=8 full_editing_flows=4 table_cases=8 resource_cases=9 foreground_empty=true sdk_session_owned=false global_key_owner_released=true fixture_cleared=true editing_verified=true memory_budget_pass=unmeasured"
         ),
         Workload::CoreUi => println!(
-            "product_acceptance event=finished workload=core_ui external_http_verified=not_run browser_internal_cleanup_verified=false repeat_cycles=3 document_flows=8 full_editing_flows=4 table_cases=8 resource_cases=9 system_ime_steps=8 full_idle_seconds=5 final_idle_seconds=5 same_process=true actual_han=true visible_candidate_near_caret=true undo_redo_restore=true saved=true viewport_lazy=true foreground_empty=true sdk_session_owned=false global_key_owner_released=true fixture_cleared=true physical_keyboard=false editing_verified=true memory_budget_pass=unmeasured"
+            "product_acceptance event=finished workload=core_ui external_http_handoff_verified=not_run browser_tab_cleanup=unverified browser_history_cleanup=unverified repeat_cycles=3 document_flows=8 full_editing_flows=4 table_cases=8 resource_cases=9 system_ime_steps=8 full_idle_seconds=5 final_idle_seconds=5 same_process=true actual_han=true visible_candidate_near_caret=true undo_redo_restore=true saved=true viewport_lazy=true foreground_empty=true sdk_session_owned=false global_key_owner_released=true fixture_cleared=true physical_keyboard=false editing_verified=true memory_budget_pass=unmeasured"
         ),
         Workload::CompleteUi => println!(
-            "product_acceptance event=finished workload=complete_ui external_http_verified=true https_verified=false browser_internal_cleanup_verified=false repeat_cycles=3 document_flows=8 full_editing_flows=4 table_cases=8 resource_cases=9 system_ime_steps=8 full_idle_seconds=5 final_idle_seconds=5 same_process=true actual_han=true visible_candidate_near_caret=true undo_redo_restore=true saved=true viewport_lazy=true foreground_empty=true sdk_session_owned=false global_key_owner_released=true fixture_cleared=true physical_keyboard=false editing_verified=true memory_budget_pass=unmeasured"
+            "product_acceptance event=finished workload=complete_ui external_http_handoff_verified=true https_verified=false browser_tab_cleanup=unverified browser_history_cleanup=unverified repeat_cycles=3 document_flows=8 full_editing_flows=4 table_cases=8 resource_cases=9 system_ime_steps=8 full_idle_seconds=5 final_idle_seconds=5 same_process=true actual_han=true visible_candidate_near_caret=true undo_redo_restore=true saved=true viewport_lazy=true foreground_empty=true sdk_session_owned=false global_key_owner_released=true fixture_cleared=true physical_keyboard=false editing_verified=true memory_budget_pass=unmeasured"
         ),
     }
     Ok(())
