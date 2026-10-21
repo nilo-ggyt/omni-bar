@@ -149,14 +149,15 @@ def package_notices(package: dict) -> dict[str, bytes]:
 
 
 def collect(output: Path, manifest: Path = ROOT / "Cargo.toml") -> dict:
-    """按实际构建清单预检许可，再在新目录生成离线可用的必要署名。"""
+    """Preflight the actual build manifest's notices before writing an offline attribution tree."""
     if output.exists():
         # The caller owns cleanup of its generated bundle; never recursively delete an arbitrary argument.
         raise ValueError("notice output already exists; supply a new generated directory")
-    # 本地跨仓联调清单可以与Host公开清单不同；许可必须来自实际构建图，不能误收旧Git版本。
+    # A caller may supply a distinct build manifest; notices must follow that exact dependency graph,
+    # rather than attributing a different Git revision merely because the host root is the default.
     manifest = manifest.resolve(strict=True)
     if not manifest.is_file():
-        # 无效清单不能回退到当前目录，否则签名产物会带错依赖署名。
+        # An invalid manifest cannot fall back to cwd and attach the wrong dependencies to a signed bundle.
         raise ValueError("build manifest is not a regular file")
     metadata = json.loads(command("cargo", "+1.99.0", "metadata", "--manifest-path", str(manifest),
                                   "--format-version", "1", "--locked", "--offline",
@@ -178,6 +179,7 @@ def collect(output: Path, manifest: Path = ROOT / "Cargo.toml") -> dict:
         for name in notices:
             # Validate every metadata-derived filename before creating even a partial output directory.
             if Path(name).name != name or name in (".", ".."):
+                # A notice filename is a single component, never a second destination chosen by metadata.
                 raise ValueError("unsupported notice filename")
         prepared.append((package, component, notices))
     sysroot = Path(command("rustc", "+1.99.0", "--print", "sysroot").strip())
@@ -223,7 +225,7 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--manifest-path", type=Path, default=ROOT / "Cargo.toml")
     arguments = parser.parse_args()
-    # 显式清单验证或许可预检失败都中止打包，不给部分署名签发完整结果。
+    # Manifest or notice preflight failure aborts packaging; partial attribution cannot receive a complete result.
     print(json.dumps(collect(arguments.output, arguments.manifest_path)))
 
 

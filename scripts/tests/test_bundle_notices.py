@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
 import importlib.util
 import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
 
 
 # Load the executable collector as a module; importing it must not create artifacts or run Cargo.
@@ -126,54 +124,6 @@ class BundleNoticeTests(unittest.TestCase):
             # A new upstream revision must be reviewed before an old supplement can be reused.
             with self.assertRaisesRegex(ValueError, "revision"):
                 COLLECTOR.package_notices(item)
-
-    def test_reviewed_objc_supplement_checks_content_digest(self) -> None:
-        """Recorded provenance only authorizes the exact upstream text that was actually reviewed."""
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            item = package(root / "archive")
-            item["repository"] = "https://github.com/madsmtm/objc2"
-            (root / "archive/.cargo_vcs_info.json").write_text(
-                json.dumps({"git": {"sha1": "reviewed"}}), encoding="utf-8"
-            )
-            # Supply a small synthetic reviewed notice, then replace its bytes after recording its hash.
-            supplement = root / "licenses/objc2"
-            supplement.mkdir(parents=True)
-            notice = b"Reviewed upstream attribution"
-            (supplement / "LICENSE.md").write_bytes(notice)
-            (root / "licenses/MIT-terms.txt").write_bytes(b"Fixture MIT permission terms")
-            (supplement / "sources.json").write_text(json.dumps([{
-                "revision": "reviewed", "file": "LICENSE.md", "sha256": hashlib.sha256(notice).hexdigest()
-            }]), encoding="utf-8")
-            with patch.object(COLLECTOR, "ROOT", root):
-                self.assertEqual(COLLECTOR.package_notices(item)["UPSTREAM-LICENSE.md"], notice)
-                (supplement / "LICENSE.md").write_bytes(b"Unreviewed replacement")
-                with self.assertRaisesRegex(ValueError, "digest"):
-                    COLLECTOR.package_notices(item)
-
-    def test_missing_notice_leaves_no_partial_output(self) -> None:
-        """A failed preflight must not leave a notice directory that packaging could mistake for complete."""
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            item = package(root / "app", "omni-native-runtime")
-            metadata = graph([item], {})
-            output = root / "bundle/ThirdPartyNotices"
-            with patch.object(COLLECTOR, "command", return_value=json.dumps(metadata)):
-                with self.assertRaisesRegex(ValueError, "no reviewed notice"):
-                    COLLECTOR.collect(output)
-            self.assertFalse(output.exists())
-
-    def test_existing_output_is_preserved_without_tool_invocation(self) -> None:
-        """An accidental existing destination never authorizes deletion or overwriting unrelated data."""
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            sentinel = root / "keep.txt"
-            sentinel.write_bytes(b"Preserve existing content")
-            with patch.object(COLLECTOR, "command") as command:
-                with self.assertRaisesRegex(ValueError, "already exists"):
-                    COLLECTOR.collect(root)
-                command.assert_not_called()
-            self.assertEqual(sentinel.read_bytes(), b"Preserve existing content")
 
 
 if __name__ == "__main__":

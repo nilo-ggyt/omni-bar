@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""显式 opt-in 的真实 OS 控制；只观察本次创建并拥有的非 GUI 合成子进程。"""
+"""Explicit opt-in OS controls observe only the non-GUI synthetic child created and owned by this run."""
 
 import argparse
 import hashlib
@@ -22,66 +22,66 @@ MAX_RUN_SECONDS = 60
 
 
 class ControlFailure(RuntimeError):
-    """固定的阶段失败标签，不把任意 OS 错误或私有路径当作协议输出。"""
+    """Carry finite stage-failure labels, excluding arbitrary OS errors and private paths from protocol output."""
 
 
 def require(condition, reason):
-    """失败即保留原始证据并停止验收，不自动重试或更改权限。"""
+    """Stop acceptance on failure while preserving evidence, without automatic retry or permission changes."""
     if not condition:
-        # 调用者的 finally 仍负责回收本 harness 拥有的子进程。
+        # The caller's finally block still owns cleanup of this harness's children.
         raise ControlFailure(reason)
 
 
 def sha256(path):
-    """有界源码/二进制输入保留完整 hash，不复用旧采样器。"""
+    """Hash bounded source/binary inputs fully instead of reusing an unidentified historical sampler."""
     require(path.stat().st_size <= 8 * 1024 * 1024, "provenance_input_too_large")
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def private_file(path, mode="wb"):
-    """仅创建本次新目录内的全新 0600 文件，不覆盖已有证据。"""
+    """Create a new 0600 file in this run's fresh directory without overwriting existing evidence."""
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     return os.fdopen(fd, mode)
 
 
 def save_json(path, value):
-    """证据写入只在外部控制器发生，不修改被测程序或用户文件。"""
+    """Write evidence in the external controller only, without modifying the observed program or user files."""
     with private_file(path) as output:
         output.write(json.dumps(value, indent=2, sort_keys=True).encode() + b"\n")
 
 
 def remaining(deadline, limit=10):
-    """每个阻塞操作均受全局期限和局部更小期限约束。"""
+    """Bound blocking operations by both the global deadline and a smaller local limit."""
     value = min(limit, deadline - time.monotonic())
     require(value > 0, "harness_deadline")
     return value
 
 
 def stop_owned(process):
-    """只清理保留 Popen owner 的子进程；绝不搜索或终止任意 PID。"""
+    """Reap only a child with a retained Popen owner, never a searched or arbitrary PID."""
     if process is None:
-        # 尚未成功启动时没有外部资源可回收。
+        # An unsuccessful launch acquired no child process to reclaim.
         return
     if process.poll() is None:
-        # 异常路径先请求终止，最多两秒后只对同一子进程执行 kill。
+        # Request termination first; after at most two seconds, kill only that same owned child.
         process.terminate()
         try:
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
-            # 合成程序不能拖延整个 harness，也不能让映射留在后台。
+            # A synthetic workload must not extend the harness indefinitely or leave its mappings in a background child.
             process.kill()
             process.wait(timeout=2)
     for stream in (process.stdin, process.stdout):
-        # 管道生命周期在 wait 后结束，避免把测量控制器留给下一次运行。
+        # End pipe ownership after wait, without carrying control channels into another run.
         if stream is not None:
             stream.close()
 
 
 def acknowledgement(process, stage, deadline):
-    """有界读取一条 ack；真实阶段完成由显式协议确认，不用固定 sleep 猜测。"""
+    """Read one bounded acknowledgement, synchronizing stage completion through protocol instead of guessed sleeps."""
     data = bytearray()
     while not data.endswith(b"\n"):
-        # 控制程序每条 ack 小于 512 bytes；EOF、过长或超时都不继续采样。
+        # Each acknowledgement fits 512 bytes; EOF, overflow, or timeout stops further sampling.
         ready, _, _ = select.select([process.stdout], [], [], remaining(deadline, 3))
         require(ready, "control_ack_timeout")
         block = os.read(process.stdout.fileno(), 513 - len(data))
@@ -93,7 +93,7 @@ def acknowledgement(process, stage, deadline):
 
 
 def command(process, value, stage, deadline, events):
-    """命令只来自本文件固定有限阶段，不接收任意分配或 shell 输入。"""
+    """Send only this file's fixed finite stages, never arbitrary allocation sizes or shell input."""
     process.stdin.write(value.encode() + b"\n")
     process.stdin.flush()
     record = acknowledgement(process, stage, deadline)
@@ -101,7 +101,7 @@ def command(process, value, stage, deadline, events):
 
 
 def sample_arguments(binary, identity, output, duration=500):
-    """所有目标字段只来自本 harness 创建的 control 的 identify，不能传入现有 PID。"""
+    """Use only identify results from this harness's control child; callers cannot select an existing external PID."""
     executable = os.fsdecode(bytes.fromhex(identity["executable_hex"]))
     return [str(binary), "sample", "--pid", str(identity["pid"]), "--birth-sec", identity["birth_sec"],
             "--birth-usec", identity["birth_usec"], "--start-abstime", identity["start_abstime"],
@@ -110,7 +110,7 @@ def sample_arguments(binary, identity, output, duration=500):
 
 
 def collect(binary, identity, root, name, deadline, cases, expected_exit, expected_valid=True):
-    """原始 JSONL、stderr、退出码和离线复核各自保留，不用测试期望覆盖真实结果。"""
+    """Preserve raw JSONL, stderr, exit status, and offline review independently, without substituting expected outcomes."""
     artifact = root / (name + ".jsonl")
     args = sample_arguments(binary, identity, artifact)
     with private_file(root / (name + ".stderr")) as stderr:
@@ -119,11 +119,11 @@ def collect(binary, identity, root, name, deadline, cases, expected_exit, expect
     report = None
     failure = None
     if artifact.exists():
-        # 原始文件存在也要独立复核，不接受 footer 的自报结果。
+        # File existence still requires independent verification; the footer cannot certify itself.
         try:
             report = REPORT.inspect_file(artifact, result.returncode)
         except (OSError, REPORT.InvalidObservation, ValueError):
-            # 失败保留原始文件；固定标记避免任意异常内容进入摘要。
+            # Retain the failed artifact; a finite category excludes arbitrary exception contents from the summary.
             failure = "offline_validation_failed"
     case = {"name": name, "arguments": args, "observer_exit_code": result.returncode,
             "artifact_exists": artifact.exists(), "offline_report": report, "failure": failure}
@@ -131,41 +131,41 @@ def collect(binary, identity, root, name, deadline, cases, expected_exit, expect
     require(result.returncode == expected_exit, "unexpected_observer_exit_" + name)
     require((report is not None) == expected_valid, "unexpected_offline_result_" + name)
     if report is not None:
-        # 有效单 PID 控制依然不能升级成 whole-product 预算通过。
+        # A valid single-PID control remains insufficient for whole-product budget acceptance.
         require(report["whole_product_budget_pass"] is False and report["membership"] == "unverified",
                 "invalid_whole_product_claim")
     return report
 
 
 def exit_during_sample(binary, identity, control, root, deadline, cases, events):
-    """已看到两个 sample 后让唯一 control 正常退出，验证缺样不变成零字节。"""
+    """Exit the sole control after two observed samples, verifying that a missing target cannot become zero-byte evidence."""
     artifact = root / "exit-during-sample.jsonl"
     args = sample_arguments(binary, identity, artifact, duration=1500)
     process = None
     with private_file(root / "exit-during-sample.stderr") as stderr:
         try:
-            # sampler 本身也有 Popen owner；异常时只清理这一个观察子进程。
+            # The sampler also has one Popen owner; exceptional cleanup targets only that observer child.
             process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=stderr)
             while True:
                 require(process.poll() is None, "sampler_finished_before_control_exit")
                 remaining(deadline, 3)
                 if artifact.exists():
-                    # 只读本次私有原始文件；记录读取也有明确字节上界。
+                    # Read only this run's private artifact, with an explicit byte ceiling on each record inspection.
                     require(artifact.stat().st_size < 65536, "exit_fixture_artifact_too_large")
                     lines = artifact.read_bytes().splitlines()
                     if sum(b'"type":"sample"' in line for line in lines) >= 2:
-                        # 使用采样器已 fflush 的记录同步，不用 elapsed 猜测它是否已开始。
+                        # Synchronize on records already flushed by the sampler, without inferring start from elapsed time.
                         break
                 time.sleep(0.01)
             command(control, "EXIT", "exiting", deadline, events)
             require(control.wait(timeout=remaining(deadline, 3)) == 0, "control_exit_failed")
             status = process.wait(timeout=remaining(deadline, 5))
         finally:
-            # 正常结束同样经过统一回收，避免留下子进程或管道。
+            # Normal completion also uses the shared cleanup path, leaving no owned child or pipe behind.
             stop_owned(process)
     invalid = False
     try:
-        # 预期是完整的失败 footer，而不是一个被接受的短窗口。
+        # Expect a complete failure footer, never acceptance of a shorter observation window.
         REPORT.inspect_file(artifact, status)
     except (OSError, REPORT.InvalidObservation, ValueError):
         invalid = True
@@ -175,7 +175,7 @@ def exit_during_sample(binary, identity, control, root, deadline, cases, events)
 
 
 def execute(root, include_over_budget):
-    """一个新编译控制进程完成全部阶段；全局期限与 finally 共同限定资源。"""
+    """Run all stages on one freshly built control, with a global deadline and finally-owned cleanup."""
     deadline = time.monotonic() + MAX_RUN_SECONDS
     result = {"schema": "omni-memory-live-control-v1", "control_only": True,
               "whole_product_budget_pass": False, "cases": [], "events": [], "passed": False,
@@ -186,7 +186,7 @@ def execute(root, include_over_budget):
     control, binary, controller = root / "control", root / "sampler", None
     try:
         with private_file(root / "build.log") as log:
-            # 每次从当前源码构建，固定 mac14 floor；不运行或复用历史 binary。
+            # Build current sources at the macOS 14 floor; do not execute or reuse an old binary.
             for source, target in ((paths[0], binary), (SOURCE, control)):
                 args = ["xcrun", "--sdk", "macosx", "clang", "-std=c17", "-Wall", "-Wextra", "-Werror",
                         "-mmacosx-version-min=14.0", str(source), "-o", str(target)]
@@ -195,7 +195,7 @@ def execute(root, include_over_budget):
                 require(completed.returncode == 0, "control_build_failed")
         result["binary_sha256"] = {"sampler": sha256(binary), "control": sha256(control)}
         with private_file(root / "control.stderr") as stderr:
-            # 唯一目标必须来自本次 Popen，外部没有 PID/路径选择参数。
+            # The sole target comes from this Popen call; no external PID/path selection argument exists.
             controller = subprocess.Popen([str(control)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                           stderr=stderr, bufsize=0)
             result["owned_control_pid"] = controller.pid
@@ -217,7 +217,7 @@ def execute(root, include_over_budget):
             allocated = collect(binary, identity, root, "allocated32", deadline, cases, 78)
             command(controller, "FREE", "freed", deadline, events)
             freed = collect(binary, identity, root, "freed32", deadline, cases, 78)
-            # 只断言观察到增长/回落和 lifetime 保留，不断言增量恰等于 32MiB。
+            # Require observed growth, reduction, and lifetime retention; physical-footprint deltas need not equal 32 MiB.
             require(int(allocated["sampled_max_current_bytes"]) > int(idle["sampled_max_current_bytes"]),
                     "touch_did_not_raise_observed_footprint")
             require(int(freed["sampled_max_current_bytes"]) < int(allocated["sampled_max_current_bytes"]),
@@ -225,7 +225,7 @@ def execute(root, include_over_budget):
             require(int(freed["max_lifetime_peak_bytes"]) >= int(allocated["max_lifetime_peak_bytes"]),
                     "lifetime_peak_was_not_preserved")
             if include_over_budget:
-                # 超预算是显式额外阶段，仍只占用这个有上限的合成进程。
+                # The over-budget stage is explicit opt-in and remains confined to this bounded synthetic child.
                 command(controller, "ALLOC192", "allocated192", deadline, events)
                 collect(binary, identity, root, "allocated192", deadline, cases, 1)
                 command(controller, "FREE", "freed", deadline, events)
@@ -244,7 +244,7 @@ def execute(root, include_over_budget):
                         for path in paths), "source_changed_during_control")
             result["passed"] = True
     except (OSError, ValueError, ControlFailure, subprocess.TimeoutExpired) as error:
-        # OS 能力/时序失败同样留证，不自动换 ABI、重试或对其他 PID 继续测量。
+        # Preserve OS capability/timing failure without switching ABI, retrying, or measuring another PID.
         result["failure"] = str(error) if isinstance(error, ControlFailure) else "control_io_or_timeout_failure"
     finally:
         stop_owned(controller)
@@ -254,14 +254,14 @@ def execute(root, include_over_budget):
 
 
 def main():
-    """help 和未 opt-in 路径不编译、不创建目录、不启动或查询任何目标。"""
+    """Help and missing opt-in perform no compilation, directory creation, target launch, or process query."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-live-controls", action="store_true")
     parser.add_argument("--include-over-budget", action="store_true")
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     if not args.run_live_controls:
-        # 防止被 unittest discovery 或无意执行当成默认轻量测试。
+        # Prevent unittest discovery or accidental invocation from treating live controls as a default lightweight test.
         parser.error("explicit --run-live-controls is required")
     require(sys.platform == "darwin" and os.getuid() != 0 and os.getuid() == os.geteuid(),
             "requires_non_elevated_macos")
@@ -275,5 +275,5 @@ def main():
 
 
 if __name__ == "__main__":
-    # 文件名不匹配 test_*.py；现有纯 CI 不会隐式执行 opt-in OS 控制。
+    # The filename does not match test_*.py, so ordinary pure-test discovery cannot implicitly run live OS controls.
     sys.exit(main())

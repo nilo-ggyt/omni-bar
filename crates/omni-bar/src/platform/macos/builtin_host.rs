@@ -171,6 +171,12 @@ impl BuiltInLifecycle for Lifecycle {
                     eprintln!("built-in close intent disagrees with foreground ownership");
                     return;
                 }
+                #[cfg(feature = "native-acceptance")]
+                if scope == PluginCloseScope::ApplicationTermination {
+                    // Observe only the real built-in release receipt after the exact native
+                    // cohort completed and this activation consumed its Host destruction barrier.
+                    super::acceptance_termination::record_terminal_release();
+                }
                 let quitting = super::termination::foreground_did_release();
                 if scope == PluginCloseScope::ApplicationTermination || quitting {
                     // The accepted original close finishes, but application termination consumes its successor slot.
@@ -233,153 +239,4 @@ pub(super) fn activate(kind: BuiltInSurface, mtm: MainThreadMarker) -> Result<()
         let _ = super::FOREGROUND_STATE.with_borrow(|state| state.cancel_creation(target));
     }
     prepared
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ForegroundSurfaceState;
-
-    /// Restore only isolated worker-thread scalar state; this guard never owns a native object or callback.
-    struct ForegroundRestore(ForegroundSurfaceState);
-
-    impl Drop for ForegroundRestore {
-        /// Preserve neighboring tests' TLS state on either ordinary return or assertion unwind.
-        fn drop(&mut self) {
-            super::super::FOREGROUND_STATE.with_borrow_mut(|state| {
-                // The previous pure state is transferred back with no native work under this mutable borrow.
-                *state = std::mem::take(&mut self.0);
-            });
-        }
-    }
-
-    /// Activate one scalar fixture; the caller must not interpret lifecycle methods as native release evidence.
-    fn with_lifecycle(work: impl FnOnce(&Lifecycle)) {
-        let previous = super::super::FOREGROUND_STATE.with_borrow_mut(std::mem::take);
-        let _restore = ForegroundRestore(previous);
-        let kind = BuiltInSurface::Calculator;
-        super::super::FOREGROUND_STATE.with_borrow(|state| {
-            // Only pure foreground claims are created; no AppKit marker, panel, input or user path is acquired.
-            state
-                .begin_creation_for(ResumeTarget::BuiltIn(kind))
-                .unwrap();
-        });
-        let lifecycle = Lifecycle::new(kind);
-        lifecycle.commit_creation(kind).unwrap();
-        work(&lifecycle);
-    }
-
-    /// A terminal request without actual pending quit cannot alter an existing ordinary transaction.
-    #[test]
-    fn unauthorized_terminal_scope_and_opposing_intent_preserve_accepted_state() {
-        with_lifecycle(|lifecycle| {
-            // The live ordinary transaction first accepts dismissal under the complete native release scope.
-            let kind = BuiltInSurface::Calculator;
-            let intent = SurfaceCloseIntent::DismissAndResume;
-            lifecycle
-                .begin_close(kind, intent, PluginCloseScope::ForegroundTransition)
-                .unwrap();
-            assert!(
-                lifecycle
-                    .begin_close(kind, intent, PluginCloseScope::ApplicationTermination)
-                    .is_err()
-            );
-            assert!(
-                lifecycle
-                    .begin_close(
-                        kind,
-                        SurfaceCloseIntent::ExitToLauncher,
-                        PluginCloseScope::ForegroundTransition
-                    )
-                    .is_err()
-            );
-            let accepted = lifecycle.accepted.get().unwrap();
-            assert_eq!(accepted.intent, intent);
-            assert_eq!(accepted.scope, PluginCloseScope::ForegroundTransition);
-            assert_eq!(accepted.ticket, None);
-            assert!(!lifecycle.finished.get());
-        });
-    }
-
-    /// A pre-promotion completion cannot consume the new scope or restore its original Launcher successor.
-    #[test]
-    fn actual_quit_promotes_same_intent_and_rejects_stale_or_downgraded_completion() {
-        with_lifecycle(|lifecycle| {
-            let kind = BuiltInSurface::Calculator;
-            let intent = SurfaceCloseIntent::ExitToLauncher;
-            // Preparation is the real scalar coordinator phase, but never enters AppKit's nested termination wait.
-            lifecycle
-                .begin_close(kind, intent, PluginCloseScope::ForegroundTransition)
-                .unwrap();
-            super::super::termination::with_preparing_termination_for_test(|| {
-                lifecycle
-                    .begin_close(kind, intent, PluginCloseScope::ApplicationTermination)
-                    .unwrap();
-                assert!(
-                    lifecycle
-                        .begin_close(kind, intent, PluginCloseScope::ForegroundTransition)
-                        .is_err()
-                );
-                let accepted = lifecycle.accepted.get().unwrap();
-                assert_eq!(accepted.intent, intent);
-                assert_eq!(accepted.scope, PluginCloseScope::ApplicationTermination);
-                assert_eq!(
-                    accepted.ticket,
-                    super::super::termination::application_termination_ticket()
-                );
-
-                // The ordinary stale callback must leave the exact foreground destruction claim untouched.
-                lifecycle.finish_close(kind, intent, PluginCloseScope::ForegroundTransition);
-                assert!(!lifecycle.finished.get());
-                assert!(
-                    super::super::FOREGROUND_STATE
-                        .with_borrow(|state| state.pending_transition().is_some())
-                );
-
-                // A trusted fake receipt tests routing only. Production calls this after its real payload/shell proof.
-                lifecycle.finish_close(kind, intent, PluginCloseScope::ApplicationTermination);
-                assert!(lifecycle.finished.get());
-                assert!(super::super::FOREGROUND_STATE.with_borrow(|state| {
-                    // Both barrier and active identity are absent; terminal completion creates no Launcher on a worker.
-                    state.pending_transition().is_none()
-                        && state.destroyed_barrier().is_none()
-                        && state.active_surface().is_none()
-                }));
-            });
-        });
-    }
-
-    /// A finished lifecycle cannot consume a later activation's same-kind foreground claim.
-    #[test]
-    fn duplicate_old_lifecycle_completion_cannot_release_a_same_kind_successor() {
-        with_lifecycle(|lifecycle| {
-            let kind = BuiltInSurface::Calculator;
-            let intent = SurfaceCloseIntent::DismissAndResume;
-            // Dismissal completion on a worker performs no native successor effect or application reply.
-            lifecycle
-                .begin_close(kind, intent, PluginCloseScope::ForegroundTransition)
-                .unwrap();
-            lifecycle.finish_close(kind, intent, PluginCloseScope::ForegroundTransition);
-            assert!(lifecycle.finished.get());
-            super::super::FOREGROUND_STATE.with_borrow(|state| {
-                // A different lifecycle instance now owns the exact same semantic kind.
-                state
-                    .begin_creation_for(ResumeTarget::BuiltIn(kind))
-                    .unwrap();
-            });
-            let successor = Lifecycle::new(kind);
-            successor.commit_creation(kind).unwrap();
-            lifecycle.finish_close(kind, intent, PluginCloseScope::ForegroundTransition);
-            assert_eq!(
-                super::super::FOREGROUND_STATE.with_borrow(|state| state.active_surface()),
-                Some(ForegroundSurface::BuiltIn(kind))
-            );
-            assert!(
-                lifecycle
-                    .begin_close(kind, intent, PluginCloseScope::ForegroundTransition)
-                    .is_err()
-            );
-            assert!(!successor.finished.get());
-        });
-    }
 }

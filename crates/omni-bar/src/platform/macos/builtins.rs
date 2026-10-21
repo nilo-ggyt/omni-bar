@@ -1,5 +1,7 @@
 //! One native foreground owner for calculator, units, clipboard history and shortcut preferences.
 
+#[cfg(feature = "native-acceptance")]
+pub(super) mod acceptance;
 mod clipboard;
 #[cfg(test)]
 mod close_tests;
@@ -118,6 +120,7 @@ define_class!(
     // SAFETY: AppKit invokes this main-thread delegate while the foreground session retains it.
     unsafe impl NSControlTextEditingDelegate for BuiltInController {
         #[unsafe(method(controlTextDidBeginEditing:))]
+        /// Record the active field's actual session history before later close preflight can inspect it.
         fn text_began(&self, _notification: &NSNotification) {
             if let Some(session) = active_session_for_controller(self) {
                 // Bind actual undo identity at editing begin; close observation must not create substitute history for a test.
@@ -126,6 +129,7 @@ define_class!(
         }
 
         #[unsafe(method(controlTextDidChange:))]
+        /// Refresh only this active capability, preserving clipboard-query reset and numeric input semantics.
         fn text_changed(&self, _notification: &NSNotification) {
             // Resolve an owned session outside TLS access before changing native result controls.
             if let Some(session) = active_session_for_controller(self) {
@@ -148,6 +152,7 @@ define_class!(
     // SAFETY: the weak panel delegate remains retained through the native close notification.
     unsafe impl NSWindowDelegate for BuiltInController {
         #[unsafe(method_id(windowWillReturnFieldEditor:toObject:))]
+        /// Lend this session's existing or lazy editor only to its own active/preflight-closing window.
         fn field_editor(
             &self,
             window: &NSWindow,
@@ -163,6 +168,7 @@ define_class!(
         }
 
         #[unsafe(method_id(windowWillReturnUndoManager:))]
+        /// Return the original session history while its window/controller pair still owns editing authority.
         fn undo_manager(&self, window: &NSWindow) -> Option<Retained<NSUndoManager>> {
             if owns_editing_window(self, window) {
                 // Lend exclusive history while active or normally resigning; accepted close prevents further creation.
@@ -174,6 +180,7 @@ define_class!(
         }
 
         #[unsafe(method(windowShouldClose:))]
+        /// Convert native advisory close into the same fallible foreground transaction used by dismissal.
         fn should_close(&self, _window: &NSWindow) -> bool {
             // Native close must enter the same host state transition as keyboard/global dismissal.
             self.enqueue_close(SurfaceCloseIntent::DismissAndResume);
@@ -181,6 +188,7 @@ define_class!(
         }
 
         #[unsafe(method(windowWillClose:))]
+        /// Record actual native close and reserve one weak-owner finalizer after this callback stack returns.
         fn will_close(&self, _notification: &NSNotification) {
             // Native close notification is an independent receipt fact, rather than a deallocation claim.
             self.ivars().close_notified.set(true);
@@ -203,12 +211,14 @@ define_class!(
 
     impl BuiltInController {
         #[unsafe(method(returnToLauncher:))]
+        /// Preserve explicit back navigation as a distinct successor intent from temporary dismissal.
         fn return_to_launcher(&self, _sender: &AnyObject) {
             // Explicit back preserves the separate restore-Launcher semantic.
             self.enqueue_close(SurfaceCloseIntent::ExitToLauncher);
         }
 
         #[unsafe(method(copyResult:))]
+        /// Copy a freshly validated current numeric result through the real pasteboard adapter.
         fn copy_result(&self, _sender: &AnyObject) {
             if let Some(session) = active_session_for_controller(self) {
                 // Compute from current input, then write without a state borrow crossing AppKit.
@@ -217,6 +227,7 @@ define_class!(
         }
 
         #[unsafe(method(unitsChanged:))]
+        /// Invalidate submitted output and rebuild only destinations compatible with the chosen source dimension.
         fn units_changed(&self, _sender: &AnyObject) {
             if let Some(session) = active_session_for_controller(self) {
                 // Rebuild only incompatible destination choices and clear the prior submitted result.
@@ -225,6 +236,7 @@ define_class!(
         }
 
         #[unsafe(method(convertUnits:))]
+        /// Share explicit conversion behavior between the native button and the numeric field's Enter action.
         fn convert_units(&self, _sender: &AnyObject) {
             if let Some(session) = active_session_for_controller(self) {
                 // The Convert button and numeric field's Enter action share the same validated conversion.
@@ -233,6 +245,7 @@ define_class!(
         }
 
         #[unsafe(method(restoreClipboard:))]
+        /// Resolve only an actual nonnegative row tag before lending one validated stored body to pasteboard write.
         fn restore_clipboard(&self, sender: &AnyObject) {
             let Some(button) = sender.downcast_ref::<objc2_app_kit::NSButton>() else {
                 // Only tagged row controls belong to this action; reject unrelated native senders.
@@ -248,6 +261,7 @@ define_class!(
         }
 
         #[unsafe(method(clearClipboard:))]
+        /// Delegate irreversible clearing to the active session's original modal confirmation and storage boundary.
         fn clear_clipboard(&self, _sender: &AnyObject) {
             if let Some(session) = active_session_for_controller(self) {
                 // The modal confirmation runs without a TLS/model borrow and blocks competing close.
@@ -265,6 +279,7 @@ define_class!(
         }
 
         #[unsafe(method(changeShortcut:))]
+        /// Apply only the binding selected from the displayed model through the sole host registration owner.
         fn change_shortcut(&self, _sender: &AnyObject) {
             if let Some(session) = active_session_for_controller(self) {
                 // Carbon registration and persistence rollback remain the host's responsibility.
@@ -304,12 +319,14 @@ define_class!(
 
     impl BuiltInPanel {
         #[unsafe(method(canBecomeKeyWindow))]
+        /// Allow the existing capability panel's native controls and input method to acquire keyboard focus.
         fn can_become_key(&self) -> bool {
             // Text fields and native input methods require a key window.
             true
         }
 
         #[unsafe(method(sendEvent:))]
+        /// Consume only existing dismissal/clipboard gestures and forward all remaining events to the native panel.
         fn send_event(&self, event: &NSEvent) {
             if event.r#type() == NSEventType::MouseMoved {
                 // Reuse the window's ordinary event stream; no tracking area or retained observer owns hover selection.
@@ -1056,6 +1073,7 @@ impl NativeBuiltInSession {
 }
 
 impl Drop for NativeBuiltInSession {
+    /// Stop foreground monitoring and sever callback/content links on every ordinary or partial-construction drop.
     fn drop(&mut self) {
         // Fallback cleanup remains bounded and never presents UI or recursively requests close.
         self.stop_resources();
@@ -1283,6 +1301,8 @@ fn request_close_in_pool(
     let _preparing = Preparing(&session.preparing_close);
     // Reject close during history lending/construction before resignation, save or admission, preserving input.
     session.controller.ivars().undo.prepare_close()?;
+    // A locally lent field editor is independently busy even when its undo manager is idle.
+    session.controller.ivars().field_editor.prepare_close()?;
     validate_close_scope(
         None,
         intent,
@@ -1304,6 +1324,7 @@ fn request_close_in_pool(
     if let Err(error) = observation
         .capture_session_payload(&session)
         .and_then(|()| session.controller.ivars().undo.prepare_close())
+        .and_then(|()| session.controller.ivars().field_editor.prepare_close())
     {
         // Before close acceptance, restore this same active owner's input focus and preserve normal keyboard access.
         restore_active_input(&session);

@@ -1,5 +1,6 @@
 /*
- * Observe one explicitly selected process through the public proc_pid_rusage API.
+ * Observe one explicitly selected process through the SDK-declared proc_pid_rusage ABI.
+ * libproc declares its interfaces private and subject to change; header availability is not a public stability promise.
  * Counters are per-PID deltas, not a process-set or coalition attribution claim.
  * Physical footprint differs from resident size; the lifetime peak is not an
  * interval peak. Paired awake/continuous clocks expose suspension contamination,
@@ -39,7 +40,7 @@ static int parse_target_pid(const char *value, pid_t *target_pid) {
   if (errno != 0 || value[0] == '\0' || end == NULL || end[0] != '\0' ||
       parsed <= 0 || parsed > INT_MAX) {
     /* Reject empty, partial, overflowing, and nonpositive selections before any
-     * process query; process existence is checked separately by the public API. */
+     * process query; process existence is checked separately by proc_pid_rusage. */
     return -1;
   }
 
@@ -65,7 +66,7 @@ static int parse_sample_seconds(const char *value, double *sample_seconds) {
   return 0;
 }
 
-/* Initialize all result bytes and request exactly the public version-4 layout. */
+/* Initialize all result bytes and request exactly the SDK-declared version-4 layout. */
 static int capture_process_usage(pid_t target_pid,
                                  struct rusage_info_v4 *usage) {
   memset(usage, 0, sizeof(*usage));
@@ -178,7 +179,7 @@ int main(int argc, const char *argv[]) {
     return 1;
   }
 
-  /* Public rusage snapshots bracket the wait but are not atomic with clock reads.
+  /* SDK-declared rusage snapshots bracket the wait but are not atomic with clock reads.
    * Query overhead lies outside the clock interval; these are finite process
    * observations, not scheduler or complete-product acceptance measurements. */
   struct rusage_info_v4 start_usage;

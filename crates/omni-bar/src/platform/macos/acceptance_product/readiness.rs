@@ -120,6 +120,7 @@ mod tests {
     use super::ReadinessSchedule;
 
     #[test]
+    /// A pending observation cannot manufacture a successor without another external notification.
     fn pending_without_a_new_real_signal_cannot_schedule_its_own_retry() {
         let mut schedule = ReadinessSchedule::default();
         assert!(schedule.begin_check().is_ok());
@@ -131,6 +132,7 @@ mod tests {
     }
 
     #[test]
+    /// Duplicate notifications coalesce, and completed observations revoke any unconsumed reason.
     fn reentrant_notifications_coalesce_and_cannot_outlive_a_ready_or_failed_check() {
         let mut schedule = ReadinessSchedule::default();
         assert!(schedule.begin_check().is_ok());

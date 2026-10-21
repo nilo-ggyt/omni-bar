@@ -1,10 +1,10 @@
-/* 只用合成标量测试采样策略；此程序不调用 capture_point 或任何 PID 查询。 */
+/* Exercise sampling policy with synthetic scalars only; this program never calls capture_point or queries a PID. */
 #define main memory_sampler_entry
 #include "../macos-process-memory-sampler.c"
 #undef main
 #include <assert.h>
 
-/* 固定测试身份不来自运行中的进程，也不声称任何真实产品归属。 */
+/* Fixed test identity does not represent a running process or establish real product membership. */
 static struct point synthetic_point(uint64_t offset) {
   struct point point = {0};
   point.identity.pid = 42;
@@ -24,13 +24,13 @@ static struct point synthetic_point(uint64_t offset) {
   return point;
 }
 
-/* 参数测试只到纯解析边界；即使构造完整 sample 形状也不会调用其 main。 */
+/* Stop argument tests at pure parsing, even when they construct the complete sample command shape. */
 static void test_parameters(void) {
   uint64_t value = 77;
   const char *bad[] = {"", "-1", "+1", " 1", "1 ", "1.0", "nan", "inf",
                        "0x10", "18446744073709551616"};
   for (size_t index = 0; index < sizeof(bad) / sizeof(bad[0]); ++index) {
-    /* 不合法输入不改变 out，防止错误路径发布默认零身份。 */
+    /* Invalid input must leave out unchanged, preventing failure from publishing a default zero identity. */
     assert(!parse_u64(bad[index], 0, UINT64_MAX, &value) && value == 77);
   }
   assert(parse_u64("18446744073709551615", 0, UINT64_MAX, &value) && value == UINT64_MAX);
@@ -41,7 +41,7 @@ static void test_parameters(void) {
   struct options options;
   assert(parse_options(18, args, &options) && options.planned_records == 3);
   args[13] = "3600000";
-  assert(!parse_options(18, args, &options)); /* 10ms 下会超过 65536 个样本。 */
+  assert(!parse_options(18, args, &options)); /* At 10 ms this would exceed 65536 records. */
   args[15] = "10000";
   assert(parse_options(18, args, &options) && options.planned_records == 361);
   args[13] = "3600001";
@@ -57,7 +57,7 @@ static void test_parameters(void) {
   assert(!parse_options(18, args, &options));
 }
 
-/* 单一失败出口保证每个反例验证的是指定原因，而非任意拒绝。 */
+/* Require each counterexample's specific rejection reason rather than accepting any unrelated failure. */
 static void expect_failure(struct point point, const struct point *previous,
                             uint64_t planned, const char *reason) {
   struct point anchor = synthetic_point(0);
@@ -68,7 +68,7 @@ static void expect_failure(struct point point, const struct point *previous,
   assert(failure && !strcmp(failure, reason));
 }
 
-/* 时间和身份边界在内存中构造，不依赖当前系统 uptime、调度或正在运行的程序。 */
+/* Supplied clock and identity boundaries do not depend on current uptime, scheduler timing, or running processes. */
 static void test_policy(void) {
   test_parameters();
   uint64_t converted = 0;
@@ -80,7 +80,7 @@ static void test_policy(void) {
   assert(!delta_ns(2, 1, &base, &converted));
   struct point first = synthetic_point(0), next = synthetic_point(10000000), changed;
   for (unsigned kind = 0; kind < 6; ++kind) {
-    /* 每个身份分量变化都独立拒绝，而不是只验证 PID 或路径。 */
+    /* Each identity-coordinate change must independently reject, rather than checking only PID or path. */
     changed = next;
     switch (kind) {
       case 0: ++changed.identity.pid; break;
@@ -107,7 +107,7 @@ static void test_policy(void) {
   changed.awake_after_ticks += 10000001;
   expect_failure(changed, &first, 10000000, "query_exceeds_interval");
 
-  /* 写入器的字节边界必须在任何输出前拒绝，footer 仍有保留空间。 */
+  /* The writer rejects byte-budget exhaustion before output while retaining reserved footer capacity. */
   FILE *file = tmpfile();
   assert(file);
   struct writer writer = {file, MAX_OUTPUT_BYTES - FOOTER_RESERVE};
@@ -116,7 +116,7 @@ static void test_policy(void) {
   assert(fclose(file) == 0);
 }
 
-/* 用生产序列化器产生三点 fixture，供独立 Python 复核器交叉验证格式和边界。 */
+/* Emit three points with the production serializer for independent Python format and boundary verification. */
 static int emit_fixture(bool over_budget) {
   struct point first = synthetic_point(0);
   struct options options = {.expected = first.identity, .duration_ns = 20000000,
@@ -127,11 +127,11 @@ static int emit_fixture(bool over_budget) {
   assert(write_header(&writer, &options, &base, midpoint(&first)));
   struct point previous = {0};
   for (uint64_t index = 0; index < 3; ++index) {
-    /* 最后一点下降的 current 与不下降的 lifetime 区分两个计数器的语义。 */
+    /* Falling current at the last point, with unchanged lifetime peak, distinguishes the two counters. */
     struct point point = synthetic_point(index * options.interval_ns);
     point.current_bytes = index == 0 ? BUDGET_BYTES - 2 : (index == 1 ? BUDGET_BYTES - 1 : 50000000);
     if (over_budget && index == 2) {
-      /* 恰好达到上限也失败，不能把“低于”误实现为“小于等于”。 */
+      /* Equality must fail: strictly below is not less than or equal to budget. */
       point.lifetime_peak_bytes = BUDGET_BYTES;
     }
     uint64_t elapsed = 0, gap = 0, span = 0, suspension = 0;
@@ -146,10 +146,10 @@ static int emit_fixture(bool over_budget) {
   return ferror(stdout) ? 1 : 0;
 }
 
-/* 这些入口只操作合成文件和内存；明确不提供真实 PID 查询入口。 */
+/* Entry points operate on synthetic files and memory only, with no live PID-query mode. */
 int main(int argc, char **argv) {
   if (argc == 2 && !strcmp(argv[1], "policy")) {
-    /* 每次运行独立完成固定次数的纯策略断言。 */
+    /* Each invocation performs a finite, independent set of pure policy assertions. */
     test_policy();
     puts("synthetic policy assertions passed");
     return 0;
@@ -157,7 +157,7 @@ int main(int argc, char **argv) {
   if (argc == 2 && !strcmp(argv[1], "fixture")) return emit_fixture(false);
   if (argc == 2 && !strcmp(argv[1], "fixture-over-budget")) return emit_fixture(true);
   if (argc == 3 && !strcmp(argv[1], "create-only")) {
-    /* 文件 fixture 仅测试独占创建边界；既存路径不能被覆盖或删除。 */
+    /* The file fixture exercises exclusive creation; existing paths cannot be overwritten or deleted. */
     FILE *file = create_output(argv[2]);
     if (!file) return EXIT_IO;
     bool written = fputs("synthetic-private-output\n", file) >= 0;

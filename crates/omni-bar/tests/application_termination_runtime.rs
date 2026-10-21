@@ -11,7 +11,7 @@ mod native {
     use std::time::Duration;
 
     use omni_native_runtime::{
-        NATIVE_TERMINATION_PROBE_INSERTION, NativeTerminationProbeOrigin,
+        BuiltInSurface, NATIVE_TERMINATION_PROBE_INSERTION, NativeTerminationProbeOrigin,
         NativeTerminationProbeScenario, release_isolated_acceptance_pasteboard,
         run_native_termination_probe_child,
     };
@@ -33,7 +33,7 @@ mod native {
         TimedOut,
     }
 
-    /// Run only exact child modes or four bounded parent scenarios; never initialize AppKit in the parent.
+    /// Run only exact child modes or twelve bounded foreground/origin pairs; never initialize AppKit in the parent.
     pub(super) fn run() -> Result<(), String> {
         let arguments = std::env::args_os().collect::<Vec<_>>();
         if arguments
@@ -41,9 +41,10 @@ mod native {
             .is_some_and(|value| value == PASTEBOARD_RELEASE_ARGUMENT)
         {
             if arguments.len() != 3 {
+                // The cleanup child accepts one still-owned fixture authority, never arbitrary pasteboard names.
                 return Err("剪贴板回收子进程只接受一个自有夹具目录".into());
             }
-            // 本独立主线程只调用原拥有层的精确清板入口，不启动另一个NSApplication图。
+            // This dedicated main thread invokes only the original exact-name cleanup, without a second NSApplication graph.
             return release_isolated_acceptance_pasteboard(Path::new(&arguments[2]));
         }
         if arguments
@@ -62,6 +63,19 @@ mod native {
                 // Each process starts production NSApplication and foreground state exactly once.
                 Some("launcher") => NativeTerminationProbeScenario::Launcher,
                 Some("markdown-dirty") => NativeTerminationProbeScenario::MarkdownDirty,
+                // Each built-in uses its real Host activation and production shortcut/lifecycle owners.
+                Some("builtin-calculator") => {
+                    NativeTerminationProbeScenario::BuiltIn(BuiltInSurface::Calculator)
+                }
+                Some("builtin-units") => {
+                    NativeTerminationProbeScenario::BuiltIn(BuiltInSurface::UnitConversion)
+                }
+                Some("builtin-clipboard") => {
+                    NativeTerminationProbeScenario::BuiltIn(BuiltInSurface::Clipboard)
+                }
+                Some("builtin-settings") => {
+                    NativeTerminationProbeScenario::BuiltIn(BuiltInSurface::Settings)
+                }
                 // No user-provided plugin identity or alternate operation is accepted by this harness.
                 _ => return Err("unknown termination probe scenario".into()),
             };
@@ -79,7 +93,14 @@ mod native {
             return Err("run this dedicated test without additional harness arguments".into());
         }
         let mut failures = Vec::new();
-        for scenario in ["launcher", "markdown-dirty"] {
+        for scenario in [
+            "launcher",
+            "markdown-dirty",
+            "builtin-calculator",
+            "builtin-units",
+            "builtin-clipboard",
+            "builtin-settings",
+        ] {
             // Each foreground exercises both production entry routes with independent native process state.
             for origin in ["menu-action", "dispatch"] {
                 // A fresh process owns one fixture, native event loop and failure-only parent watchdog.
@@ -91,7 +112,7 @@ mod native {
         }
         if failures.is_empty() {
             // These are programmatic native event/resource observations, never physical-input/product acceptance.
-            println!("termination_integration=passed scenarios=4 physical_acceptance=false");
+            println!("termination_integration=passed scenarios=12 physical_acceptance=false");
             Ok(())
         } else {
             // Exact private artifact locations and bounded captured output remain available for every failing child.
@@ -171,7 +192,8 @@ mod native {
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
-    /// 父进程不进入AppKit；原子进程reap后，用同一有界子进程协议归还它的私有板。
+    /// Release the reaped child's exact private board through the same bounded subprocess protocol.
+    /// The parent itself never initializes AppKit or acquires another foreground graph.
     fn release_fixture_pasteboard(fixture: &Path) -> Result<(), String> {
         let mut child = Command::new(std::env::current_exe().map_err(|error| error.to_string())?)
             .args([
@@ -183,7 +205,7 @@ mod native {
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|error| format!("无法启动夹具剪贴板回收子进程：{error}"))?;
-        // 与原Native子进程一样由Child唯一拥有并reap；超时不能留下另一个清理进程。
+        // Child owns and reaps this cleanup process too; timeout cannot leave an additional cleanup process alive.
         match wait_owned_child(&mut child)? {
             ChildCompletion::Exited(status) if status.success() => Ok(()),
             ChildCompletion::Exited(status) => Err(format!("夹具剪贴板回收失败：{status}")),
@@ -220,10 +242,11 @@ mod native {
             .map_err(|error| error.to_string())?;
         let completion = wait_owned_child(&mut child);
         let pasteboard_release = if completion.is_ok() {
-            // wait_owned_child的Ok两种结局都已真正wait/reap；正常退出和kill均走同一收尾。
-            // 目录仍归本TempDir独占，不能先删除目录再凭路径或复用inode猜测原板身份。
+            // Both successful wait outcomes actually reaped the original child, including watchdog kill.
+            // Keep its exclusive directory live until name recovery ends, preventing path/inode reuse ambiguity.
             release_fixture_pasteboard(&fixture)
         } else {
+            // Unconfirmed reaping cannot authorize concurrent takeover of a potentially live child's namespace.
             Err("原子进程的reap未完整确认，保留夹具，禁止并行接管其剪贴板".into())
         };
         let stdout = read_log(&stdout_path);
@@ -262,11 +285,12 @@ mod native {
             (Err(execution), Err(proof)) => Err(format!("{execution}; {proof}")),
         };
         let validation = match (validation, pasteboard_release) {
+            // Cleanup is independently required; neither functional success nor a prior failure hides its result.
             (Ok(()), Ok(())) => Ok(()),
             (Err(error), Ok(())) => Err(error),
             (Ok(()), Err(cleanup)) => Err(cleanup),
             (Err(error), Err(cleanup)) => Err(format!("{error}; 剪贴板回收同时失败：{cleanup}")),
-        }; // 数据/退出首因不能被清理结果覆盖，清理失败也不能被一次业务成功掩盖。
+        };
         if let Err(error) = validation {
             // Keep exactly this parent-created directory; do not remove or overwrite any other artifact path.
             let preserved = directory.keep();
@@ -304,7 +328,7 @@ mod native {
                 // The parent independently declares a serial-main-dispatch regression case.
                 "termination_probe event=origin value=dispatch"
             } else {
-                // 原菜单动作不依赖退出快捷键；target/action必须仍由已安装的原NSMenu拥有。
+                // The original installed menu owns the target/action; this route requires no quit shortcut.
                 "termination_probe event=origin value=menu_action"
             },
             "termination_probe event=foreground_ready production_owner=true",
@@ -327,15 +351,27 @@ mod native {
             expected.push(dirty);
             Some(note)
         } else {
-            // Launcher owns no document and cannot manufacture an input/save proof.
+            // Launcher and built-ins own no Markdown draft and cannot manufacture a save proof.
             None
         };
+        if let Some(kind) = scenario.strip_prefix("builtin-") {
+            // Require real resize/focus/ownership observations for the exact declared capability.
+            // Settings deliberately exercises its existing picker, so hidden text-history claims
+            // are forbidden rather than invented as a passing native-editor observation.
+            expected.push(match kind {
+                "calculator" => "termination_probe event=builtin_ui kind=calculator undecorated=true resizable=true chinese_title=true resize_geometries=3 input_ready=true session_undo=verified",
+                "units" => "termination_probe event=builtin_ui kind=units undecorated=true resizable=true chinese_title=true resize_geometries=3 input_ready=true session_undo=verified",
+                "clipboard" => "termination_probe event=builtin_ui kind=clipboard undecorated=true resizable=true chinese_title=true resize_geometries=3 input_ready=true session_undo=verified",
+                "settings" => "termination_probe event=builtin_ui kind=settings undecorated=true resizable=true chinese_title=true resize_geometries=3 input_ready=true session_undo=not_applicable",
+                _ => return Err("unknown built-in UI proof identity".into()),
+            });
+        }
         expected.push("termination_probe event=terminate_requested temporary_graph_retains=none");
         if origin == "dispatch" {
             // The originating GCD callback must return before any modal delegate wait is entered.
             expected.push("termination_probe event=dispatch_request_returned");
         } else {
-            // 仍保真实菜单入口与action退栈顺序，不能去掉两场景或改成直接coordinator调用。
+            // Verify both original menu scenarios and action-stack return ordering without a coordinator bypass.
             expected.extend([
                 "termination_probe event=menu_action_requested key_equivalent_empty=true",
                 "termination_probe event=menu_action original_item_matches=true",
@@ -347,16 +383,16 @@ mod native {
             .last()
             .copied()
             .unwrap_or("missing terminal payload/shell proof");
-        // 父端限定每个场景允许的独立正文观察；不接受 attached/unobserved 或由子端任选身份。
+        // The parent fixes each scenario's permitted body observations; the child cannot select a convenient identity.
         let editor_observations: &[&str] = if scenario == "markdown-dirty" {
-            // 实际 nil 与完整收据共同证明的具体空壳分别报告，不能把后者写成析构。
+            // Actual nil and a separately verified inert shell remain distinct; an inert shell is not deallocation.
             &["nil", "inert"]
         } else {
-            // Launcher 场景没有正文，出现任何正文身份都代表错误的资源范围。
+            // Launcher and built-ins own no Markdown body; a body identity would indicate a wrong scope.
             &["not_applicable"]
         };
         let terminal_valid = editor_observations.iter().any(|observation| {
-            // 只枚举 terminal scope 明确允许的两个窗口结果；其余标量仍要求完整且各出现一次。
+            // Enumerate only the two window outcomes permitted by terminal scope; every other scalar remains exact.
             ["pending", "none"].into_iter().any(|lease| {
                 terminal == format!(
                     "termination_probe event=will_terminate terminal_receipt=true payload_clear=true editor_payload={observation} shell_valid=true framework_window_lease={lease} foreground_released=true later_replies=1 async_replies=1"

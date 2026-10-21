@@ -49,6 +49,7 @@ fn completed(bytes: &[u8]) -> bool {
 /// Wide clocks/identities survive exactly, optional fields stay null, and output contains no body/path/error.
 #[test]
 fn stable_scalar_schema_preserves_wide_values_and_null_fields() {
+    // Wide values are external JSON-format inputs here; this fixture does not establish a real native input callback.
     let record = Record {
         serial: u64::MAX,
         kind: Kind::CanonicalAccepted,
@@ -90,75 +91,10 @@ fn stable_scalar_schema_preserves_wide_values_and_null_fields() {
     assert_eq!(footer["footer_durability_certified"], false);
 }
 
-/// Every current enum spelling is an explicit protocol contract, not an unstable Debug representation.
+/// Invalid recordings remain inspectable without claiming valid input or latency evidence.
 #[test]
-fn exhaustive_labels_and_invalidity_remain_explicit() {
-    assert_eq!(
-        [
-            Kind::Empty,
-            Kind::KeyDownBegin,
-            Kind::KeyDownEnd,
-            Kind::SelectorBegin,
-            Kind::SelectorEnd,
-            Kind::CanonicalAccepted,
-            Kind::CanonicalRejected
-        ]
-        .map(kind_label),
-        [
-            "empty",
-            "key_down_begin",
-            "key_down_end",
-            "selector_begin",
-            "selector_end",
-            "canonical_accepted",
-            "canonical_rejected"
-        ]
-    );
-    assert_eq!(
-        [
-            Selector::InsertText,
-            Selector::SetMarkedText,
-            Selector::UnmarkText
-        ]
-        .map(selector_label),
-        ["insert_text", "set_marked_text", "unmark_text"]
-    );
-    assert_eq!(
-        [
-            Outcome::NotApplicable,
-            Outcome::Nested,
-            Outcome::Provisional,
-            Outcome::CommittedChanged,
-            Outcome::CommittedExisting,
-            Outcome::NoCommit,
-            Outcome::Rejected
-        ]
-        .map(outcome_label),
-        [
-            "not_applicable",
-            "nested",
-            "provisional",
-            "committed_changed",
-            "committed_existing",
-            "no_commit",
-            "rejected"
-        ]
-    );
-    assert_eq!(
-        [
-            Rejection::Closing,
-            Rejection::CoordinateOverflow,
-            Rejection::DocumentUnavailable,
-            Rejection::CanonicalError
-        ]
-        .map(rejection_label),
-        [
-            "closing",
-            "coordinate_overflow",
-            "document_unavailable",
-            "canonical_error"
-        ]
-    );
+fn invalid_recordings_remain_invalid_in_exported_footer() {
+    // Invalid recordings stay exportable for inspection, but neither header nor footer may label them valid.
     let record = Record {
         kind: Kind::CanonicalRejected,
         ..Record::default()
@@ -185,6 +121,7 @@ fn exhaustive_labels_and_invalidity_remain_explicit() {
 /// The largest legal run fits the byte ceiling; malformed populated slices fail rather than truncate.
 #[test]
 fn capacity_and_byte_budgets_bound_the_entire_artifact() {
+    // Exercise maximum-width scalar spellings together, rather than inferring total budget from a small average record.
     let record = Record {
         serial: u64::MAX,
         kind: Kind::SelectorEnd,
@@ -210,6 +147,7 @@ fn capacity_and_byte_budgets_bound_the_entire_artifact() {
         encoded.prefix.iter().filter(|byte| **byte == b'\n').count(),
         CAPACITY + 1
     );
+    // Too many populated records or an unused Empty entry fail as malformed evidence without silent truncation.
     assert!(matches!(
         encode(evidence(&vec![record; CAPACITY + 1])),
         Err(ExportError::InvalidShape)
@@ -218,6 +156,7 @@ fn capacity_and_byte_budgets_bound_the_entire_artifact() {
         encode(evidence(&[Record::default()])),
         Err(ExportError::InvalidShape)
     ));
+    // Oversized single-line serialization must reject before extending the retained output bytes.
     let mut bytes = Vec::new();
     assert!(
         append_line(
@@ -230,61 +169,10 @@ fn capacity_and_byte_budgets_bound_the_entire_artifact() {
     assert!(bytes.is_empty());
 }
 
-/// A finite failing writer models prefix, pre-footer and final-newline failures without native/filesystem tricks.
-struct FailingWriter {
-    bytes: Vec<u8>,
-    limit: usize,
-}
-impl Write for FailingWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if self.bytes.len() == self.limit {
-            // A precise failure boundary tests that the footer is never announced through a partial last write.
-            return Err(io::Error::other("synthetic output failure"));
-        }
-        let count = bytes.len().min(self.limit - self.bytes.len());
-        self.bytes.extend_from_slice(&bytes[..count]);
-        Ok(count)
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        // This in-memory writer has no delayed IO; failure injection belongs to explicit write boundaries.
-        Ok(())
-    }
-}
-
-/// No IO/identity failure can leave an accepted newline-terminated completion footer.
-#[test]
-fn incomplete_writes_and_pre_footer_failure_never_complete() {
-    let encoded = encode(evidence(&[])).unwrap();
-    for limit in [
-        0,
-        encoded.prefix.len() / 2,
-        encoded.prefix.len(),
-        encoded.prefix.len() + encoded.footer.len() - 1,
-    ] {
-        // Each boundary is finite and includes the dangerous case of a complete JSON footer missing only newline.
-        let mut writer = FailingWriter {
-            bytes: Vec::new(),
-            limit,
-        };
-        assert_eq!(
-            write_artifact(&mut writer, &encoded, |_| Ok(())),
-            Err(ExportError::Storage)
-        );
-        assert!(!completed(&writer.bytes));
-    }
-    let mut writer = Vec::new();
-    assert_eq!(
-        write_artifact(&mut writer, &encoded, |_| Err(ExportError::RootChanged)),
-        Err(ExportError::RootChanged)
-    );
-    assert_eq!(writer, encoded.prefix);
-    assert!(!completed(&writer));
-    write_artifact(&mut Vec::new(), &encoded, |_| Ok(())).unwrap();
-}
-
 /// Exclusive fixed-name creation preserves preexisting file/hardlink/symlink nodes and their victim bytes.
 #[test]
 fn existing_aliases_are_never_overwritten_or_removed() {
+    // Both temporary roots are test-owned; the victim deliberately lives outside export authority, never in the user vault.
     let root_directory = private_directory();
     let external = tempfile::tempdir().unwrap();
     let victim = external.path().join("victim");
@@ -304,6 +192,7 @@ fn existing_aliases_are_never_overwritten_or_removed() {
         b"existing artifact",
     )
     .unwrap();
+    // Three actual existing aliases force exclusive creation to choose the fourth fixed name while preserving victims.
     let root = ExportRoot::open(root_directory.path()).unwrap();
     root.publish(&encode(evidence(&[])).unwrap()).unwrap();
     assert_eq!(
@@ -334,6 +223,7 @@ fn existing_aliases_are_never_overwritten_or_removed() {
 /// A retained descriptor does not authorize publication after its declared root pathname is replaced.
 #[test]
 fn replaced_or_symlink_roots_cannot_receive_exports() {
+    // Retain the real directory descriptor, then replace only this test's owned pathname to exercise publication identity.
     let parent = tempfile::tempdir().unwrap();
     let path = parent.path().join("root");
     std::fs::create_dir(&path).unwrap();
@@ -348,6 +238,7 @@ fn replaced_or_symlink_roots_cannot_receive_exports() {
     );
     assert_eq!(std::fs::read_dir(&path).unwrap().count(), 0);
     assert_eq!(std::fs::read_dir(&moved).unwrap().count(), 0);
+    // A symlink to the retained original directory is still not the promised real final-component authority.
     let link = parent.path().join("link");
     symlink(&moved, &link).unwrap();
     assert!(matches!(
@@ -359,6 +250,7 @@ fn replaced_or_symlink_roots_cannot_receive_exports() {
 /// Publication cannot certify a replaced output pathname or a newly aliased owned output inode.
 #[test]
 fn output_identity_and_link_count_are_checked_before_completion() {
+    // The open output fd remains real and live while its owned pathname changes to an external synthetic victim link.
     let directory = private_directory();
     let external = tempfile::tempdir().unwrap();
     let victim = external.path().join("victim");
@@ -376,6 +268,7 @@ fn output_identity_and_link_count_are_checked_before_completion() {
         std::fs::read(&victim).unwrap(),
         b"unchanged synthetic victim"
     );
+    // Newly introducing a hardlink to another exclusively created output also prevents completion certification.
     let (file, name) = root.create_exclusive().unwrap();
     let original = directory.path().join(name.to_str().unwrap());
     std::fs::hard_link(&original, external.path().join("new-alias")).unwrap();

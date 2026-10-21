@@ -1,7 +1,7 @@
 /*
- * 对一个明确选择的同用户 PID 进行有界 physical-footprint 采样。
- * 本工具只报告单进程事实；进程集合归属、完整工作负载和持续增长仍未证明。
- * libproc.h 将其接口标为 private/subject to change；只使用当前 SDK 已声明的 ABI。
+ * Sample a bounded physical-footprint window for one explicitly selected same-user PID.
+ * Results establish single-process facts only, without proving product membership, workload completeness, or steady growth.
+ * libproc.h marks its interfaces private/subject to change; calls use only the ABI declared by the current SDK.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -23,15 +23,15 @@
 #define MAX_OUTPUT_BYTES (64u * 1024u * 1024u)
 #define MAX_LINE_BYTES 16384u
 #define FOOTER_RESERVE 2048u
-/* 用户要求整产品峰值严格低于十进制150MB；单进程观测也使用同一严格边界。 */
-#define BUDGET_BYTES UINT64_C(150000000)
+/* The user's product budget is strictly below decimal 200 MB; a single-PID observation uses that same boundary. */
+#define BUDGET_BYTES UINT64_C(200000000)
 #define NS_PER_MS UINT64_C(1000000)
 #define NS_PER_SECOND UINT64_C(1000000000)
 
 enum { EXIT_BUDGET = 1, EXIT_USAGE = 64, EXIT_INVALID = 65, EXIT_IO = 74,
        EXIT_MEMBERSHIP_UNVERIFIED = 78 };
 
-/* 出生坐标和路径共同固定选择，不以 PID、名称或 PPID 代替进程身份。 */
+/* Birth coordinates and executable path anchor selection; PID, name, or PPID alone cannot identify a process epoch. */
 struct identity {
   pid_t pid;
   uid_t uid;
@@ -41,7 +41,7 @@ struct identity {
   char executable[PROC_PIDPATHINFO_MAXSIZE];
 };
 
-/* 两侧时钟括号保留查询耗时和时钟读取不确定度，不伪装成原子快照。 */
+/* Clock brackets preserve query cost and read uncertainty rather than claiming an atomic snapshot. */
 struct point {
   struct identity identity;
   uint64_t current_bytes;
@@ -54,7 +54,7 @@ struct point {
   uint64_t awake_after_ticks;
 };
 
-/* 参数和记录数在任何目标查询或输出文件创建前完成验证。 */
+/* Validate arguments and the record budget before querying a target or creating output. */
 struct options {
   bool identify;
   struct identity expected;
@@ -64,7 +64,7 @@ struct options {
   const char *output;
 };
 
-/* 累计状态只保留标量；不缓存整个样本序列。 */
+/* Retain scalar aggregates only, never the full sample sequence. */
 struct summary {
   uint64_t records;
   uint64_t max_current;
@@ -73,32 +73,32 @@ struct summary {
   uint64_t max_query_ns;
 };
 
-/* 每条记录在固定缓冲中完整编码后写出，预留错误 footer 的有限空间。 */
+/* Encode each complete record in a fixed buffer, reserving finite output capacity for a failure footer. */
 struct writer { FILE *file; uint64_t bytes; };
 
-/* 只接受完整十进制无符号输入；拒绝符号、空白、NaN 和部分解析。 */
+/* Parse complete unsigned decimal input, rejecting signs, whitespace, NaN, and accepted prefixes of invalid text. */
 static bool parse_u64(const char *text, uint64_t min, uint64_t max, uint64_t *out) {
   if (!text || !*text) {
-    /* 缺值不能隐式选中 PID 0 或零时长。 */
+    /* A missing value cannot implicitly select PID zero or a zero-length observation. */
     return false;
   }
   uint64_t value = 0;
   for (const unsigned char *cursor = (const unsigned char *)text; *cursor; ++cursor) {
-    /* 在乘加前验证每一位，避免溢出及 strtoull 的负数转换。 */
+    /* Check each digit before multiplication and addition, excluding overflow and strtoull's signed-input conversion. */
     if (*cursor < '0' || *cursor > '9' || value > (UINT64_MAX - (*cursor - '0')) / 10) {
       return false;
     }
     value = value * 10 + (*cursor - '0');
   }
   if (value < min || value > max) {
-    /* 超出 ABI 或运行预算的数值不能到达采样循环。 */
+    /* Values outside the ABI or observation budget must not reach the sampling loop. */
     return false;
   }
   *out = value;
   return true;
 }
 
-/* 不启动任何工具、原生应用或权限查询；help 是纯参数说明。 */
+/* Help describes arguments without launching tools, native applications, or permission queries. */
 static void usage(void) {
   puts("usage: memory-sampler identify --pid PID\n"
        "       memory-sampler sample --pid PID --birth-sec SEC --birth-usec USEC\n"
@@ -108,107 +108,107 @@ static void usage(void) {
        "scope: single PID only; whole-product membership remains unverified (valid collection exits 78)");
 }
 
-/* 严格参数集合防止重复字段覆盖选择，也不提供声称 whole-product 的开关。 */
+/* One exact argument set prevents duplicate selection fields; no switch can self-certify whole-product membership. */
 static bool parse_options(int argc, char **argv, struct options *options) {
   memset(options, 0, sizeof(*options));
   if (argc < 2 || (strcmp(argv[1], "identify") && strcmp(argv[1], "sample"))) {
-    /* 模式必须明确，不能因拼写错误落入实际查询。 */
+    /* A misspelled mode must not fall through to a live query. */
     return false;
   }
   options->identify = !strcmp(argv[1], "identify");
   uint32_t seen = 0;
   for (int index = 2; index < argc; index += 2) {
-    /* 所有字段都必须有值；未知和重复参数都失败，不执行恢复性查询。 */
+    /* Every field needs a value; unknown or duplicate arguments fail before any recovery query. */
     if (index + 1 >= argc) return false;
     const char *key = argv[index], *value = argv[index + 1];
     uint32_t bit = 0;
     uint64_t parsed = 0;
     if (!strcmp(key, "--pid")) {
-      /* 只接受可由 pid_t 表示的正 PID，排除进程组和任意进程选择。 */
+      /* Accept only a positive representable PID, excluding process-group and wildcard selection. */
       bit = 1u;
       if (!parse_u64(value, 1, INT_MAX, &parsed)) return false;
       options->expected.pid = (pid_t)parsed;
     } else if (!strcmp(key, "--birth-sec")) {
-      /* 出生时间不能为空；它来自操作者先前明确核对的 identify。 */
+      /* Require the nonzero birth time previously obtained through explicit identify. */
       bit = 2u;
       if (!parse_u64(value, 1, UINT64_MAX, &options->expected.birth_sec)) return false;
     } else if (!strcmp(key, "--birth-usec")) {
-      /* BSD 微秒字段只接受一个秒内的精确范围。 */
+      /* The BSD microsecond coordinate must lie within one second. */
       bit = 4u;
       if (!parse_u64(value, 0, 999999, &options->expected.birth_usec)) return false;
     } else if (!strcmp(key, "--start-abstime")) {
-      /* 独立的 rusage 出生坐标不能用 PID 相等替代。 */
+      /* The independent rusage birth coordinate cannot be replaced with PID equality. */
       bit = 8u;
       if (!parse_u64(value, 1, UINT64_MAX, &options->expected.start_ticks)) return false;
     } else if (!strcmp(key, "--executable")) {
-      /* 固定长度保存绝对路径字节；超长路径不能截断后比较。 */
+      /* Retain the full absolute path in fixed storage; truncating an oversized identity is not allowed. */
       bit = 16u;
       size_t length = strlen(value);
       if (value[0] != '/' || length >= sizeof(options->expected.executable)) return false;
       memcpy(options->expected.executable, value, length + 1);
     } else if (!strcmp(key, "--duration-ms")) {
-      /* 整数毫秒和一小时上限在乘法前约束，不允许 NaN 或浮点转换。 */
+      /* Bound integer milliseconds to one hour before multiplying; no floating-point conversion is involved. */
       bit = 32u;
       if (!parse_u64(value, 10, 3600000, &parsed)) return false;
       options->duration_ns = parsed * NS_PER_MS;
     } else if (!strcmp(key, "--interval-ms")) {
-      /* 10ms 下限约束频率，10s 上限避免将稀疏终点包装成瞬态观测。 */
+      /* The 10 ms floor bounds query frequency; the 10 s ceiling excludes arbitrarily sparse endpoint claims. */
       bit = 64u;
       if (!parse_u64(value, 10, 10000, &parsed)) return false;
       options->interval_ns = parsed * NS_PER_MS;
     } else if (!strcmp(key, "--output")) {
-      /* 输出路径必须显式且绝对，不把当前工作目录当作隐含发布位置。 */
+      /* Output must be explicit and absolute; cwd cannot become an implicit publication location. */
       bit = 128u;
       if (value[0] != '/' || strlen(value) >= PATH_MAX) return false;
       options->output = value;
     } else {
-      /* 不允许别名、位置参数或未知字段扩大采样权限。 */
+      /* Aliases, positional arguments, and unknown fields cannot broaden sampling authority. */
       return false;
     }
-    /* 重复参数即使值相同也拒绝，避免覆盖前一选择的歧义。 */
+    /* Reject repeated arguments even when values match, avoiding ambiguous replacement of a prior selection. */
     if (seen & bit) return false;
     seen |= bit;
   }
   if (options->identify) {
-    /* 身份模式只接受 PID，不创建文件，也不承诺进程集合归属。 */
+    /* Identify accepts only a PID, creates no file, and makes no product-membership claim. */
     return seen == 1u;
   }
-  /* sample 必须携带全部身份与预算，且至少有一个完整间隔。 */
+  /* Sampling requires the complete identity and budget, covering at least one full interval. */
   if (seen != 255u || options->duration_ns < options->interval_ns) return false;
   options->planned_records = (options->duration_ns + options->interval_ns - 1) /
                              options->interval_ns + 1;
   return options->planned_records <= MAX_RECORDS;
 }
 
-/* 宽整数先乘后除，精确保留字节和时钟标量，不假设 Apple Silicon 的 timebase 为 1:1。 */
+/* Multiply in a wide integer before division; Apple Silicon does not imply a 1:1 timebase. */
 static bool ticks_to_ns(uint64_t ticks, const mach_timebase_info_data_t *base, uint64_t *ns) {
-  /* 不支持的 timebase 不得退化为隐含 1:1。 */
+  /* An unsupported timebase cannot silently become 1:1. */
   if (!base->numer || !base->denom) return false;
   __uint128_t value = (__uint128_t)ticks * base->numer / base->denom;
-  /* 结果仍须适配输出协议的 u64，失败时不发布截断值。 */
+  /* The result must still fit the output protocol's u64; never publish a truncated conversion. */
   if (value > UINT64_MAX) return false;
   *ns = (uint64_t)value;
   return true;
 }
 
-/* 同一 Mach 域内只比较有序差值，原始 absolute 与 continuous 的 epoch 不直接相减。 */
+/* Subtract ordered timestamps only within one Mach clock domain, never unrelated absolute/continuous epochs. */
 static bool delta_ns(uint64_t before, uint64_t after,
                      const mach_timebase_info_data_t *base, uint64_t *ns) {
-  /* 时钟倒退是无效观测，不能无符号回绕成巨大间隙。 */
+  /* A backward clock is invalid evidence, not an unsigned wraparound gap. */
   if (after < before) return false;
   return ticks_to_ns(after - before, base, ns);
 }
 
-/* 枚举字段完整且出生坐标合理时才承认一次 BSD 身份读取。 */
+/* Accept a BSD identity only when the complete declared structure and plausible birth coordinates are available. */
 static bool read_bsd(pid_t pid, struct proc_bsdinfo *info) {
-  /* SDK 大小和已初始化、自然对齐的栈存储构成该 C ABI 的缓冲区约束。 */
+  /* SDK-sized, initialized, naturally aligned stack storage satisfies this C ABI's buffer contract. */
   memset(info, 0, sizeof(*info));
   return proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, info, sizeof(*info)) == sizeof(*info) &&
          info->pbi_pid == (uint32_t)pid && info->pbi_start_tvsec != 0 &&
          info->pbi_start_tvusec < 1000000 && info->pbi_uid == getuid();
 }
 
-/* 目标路径由前后两次出生信息及两次 rusage start 身份包围，PID 复用不能继承授权。 */
+/* Bracket the executable path with BSD and rusage birth identities so PID reuse cannot inherit selection. */
 static bool capture_point(pid_t pid, struct point *point) {
   memset(point, 0, sizeof(*point));
   point->before_ticks = mach_continuous_time();
@@ -217,15 +217,15 @@ static bool capture_point(pid_t pid, struct point *point) {
   struct proc_bsdinfo first, last;
   struct rusage_info_v4 first_usage = {0}, last_usage = {0};
   char last_path[PROC_PIDPATHINFO_MAXSIZE] = {0};
-  /* 只传当前 SDK 声明的完整 v4 存储，两个路径缓冲均有确定上限。
-   * 查询前后身份和路径必须相同；这不是对同用户恶意 exec/ABA 的原子授权证明。 */
+  /* Supply complete SDK-declared v4 storage and bounded path buffers.
+   * Identity and paths must agree across reads; this is not an atomic authorization proof against same-user exec/ABA. */
   if (!read_bsd(pid, &first) ||
       proc_pid_rusage(pid, RUSAGE_INFO_V4, (rusage_info_t *)&first_usage) != 0 ||
       proc_pidpath(pid, point->identity.executable, sizeof(point->identity.executable)) <= 0 ||
       !read_bsd(pid, &last) ||
       proc_pid_rusage(pid, RUSAGE_INFO_V4, (rusage_info_t *)&last_usage) != 0 ||
       proc_pidpath(pid, last_path, sizeof(last_path)) <= 0) {
-    /* 不可读、退出及 ABI 失败都是缺样，不以零内存替代。 */
+    /* Unreadable, exited, or ABI-failed observations are missing samples, never zero-memory samples. */
     return false;
   }
   point->after_begin_ticks = mach_continuous_time();
@@ -239,7 +239,7 @@ static bool capture_point(pid_t pid, struct point *point) {
       !memchr(point->identity.executable, 0, sizeof(point->identity.executable)) ||
       !memchr(last_path, 0, sizeof(last_path)) ||
       point->identity.executable[0] != '/' || strcmp(point->identity.executable, last_path)) {
-    /* 已退出进程可由 rusage 返回，但不构成本工具要求的完整存活观测窗口。 */
+    /* rusage may return an exited process, which does not satisfy this tool's live observation-window contract. */
     return false;
   }
   point->identity.pid = pid;
@@ -252,7 +252,7 @@ static bool capture_point(pid_t pid, struct point *point) {
   return true;
 }
 
-/* 不经 UTF-8 猜测编码文件系统路径；十六进制仍是私有本地身份数据，不能自动发布。 */
+/* Encode filesystem bytes without guessing UTF-8; hex remains private local identity data, not publishable anonymization. */
 static void path_hex(const char *path, char *encoded) {
   const char digits[] = "0123456789abcdef";
   size_t length = strlen(path);
@@ -264,7 +264,7 @@ static void path_hex(const char *path, char *encoded) {
   encoded[length * 2] = 0;
 }
 
-/* 匹配操作者选择的全部身份坐标；UID 相同不代表属于同一个产品。 */
+/* Match every selected identity coordinate; sharing a UID does not establish product membership. */
 static bool same_identity(const struct identity *observed, const struct identity *expected) {
   return observed->pid == expected->pid && observed->uid == expected->uid &&
          observed->birth_sec == expected->birth_sec && observed->birth_usec == expected->birth_usec &&
@@ -272,12 +272,12 @@ static bool same_identity(const struct identity *observed, const struct identity
          !strcmp(observed->executable, expected->executable);
 }
 
-/* 以包含 awake 读取的 continuous 括号中点估计样本时间，保留完整括号用于误差说明。 */
+/* Estimate sample time at the continuous-clock bracket midpoint while retaining bracket width as read uncertainty. */
 static uint64_t midpoint(const struct point *point) {
   return point->before_ticks + (point->before_end_ticks - point->before_ticks) / 2;
 }
 
-/* 原始时钟次序必须先于 midpoint 的无符号减法验证。 */
+/* Validate raw clock order before midpoint's unsigned subtraction. */
 static bool ordered_clock(const struct point *point) {
   return point->before_ticks <= point->before_end_ticks &&
          point->before_end_ticks <= point->after_begin_ticks &&
@@ -285,75 +285,75 @@ static bool ordered_clock(const struct point *point) {
          point->awake_before_ticks <= point->awake_after_ticks;
 }
 
-/* 从同域差值中扣除完整读取括号，只有确定超出误差的部分才报告休眠下界。 */
+/* Subtract the full read uncertainty from same-domain deltas; only the remaining excess is a suspension lower bound. */
 static bool suspended_ns(uint64_t continuous_delta, uint64_t awake_delta, uint64_t uncertainty,
                          const mach_timebase_info_data_t *base, uint64_t *ns) {
   uint64_t lower = 0;
   if (continuous_delta > awake_delta && continuous_delta - awake_delta > uncertainty) {
-    /* 只保留超过全部读取误差的正差，避免正常读取顺序产生假休眠。 */
+    /* Keep only excess beyond all bracket uncertainty, avoiding false suspension from ordinary read ordering. */
     lower = continuous_delta - awake_delta - uncertainty;
   }
   return ticks_to_ns(lower, base, ns);
 }
 
-/* 纯策略函数供合成 fixture 验证身份、时钟、间隙和 peak 不变量，无系统查询。 */
+/* Validate identity, clocks, gaps, and peak invariants from supplied observations without performing system queries. */
 static const char *validate_point(const struct point *point, const struct point *previous,
                                   const struct identity *expected, uint64_t origin,
                                   uint64_t planned_ns, uint64_t interval_ns,
                                   const mach_timebase_info_data_t *base,
                                   uint64_t *elapsed, uint64_t *gap, uint64_t *span,
                                   uint64_t *suspension) {
-  /* 路径、出生坐标及 UID 任一变化均终止原选择，不重新选中一个同名进程。 */
+  /* Any path, birth-coordinate, or UID change ends the selection; do not reacquire a similarly named process. */
   if (!same_identity(&point->identity, expected)) return "identity_changed";
-  /* 括号有序时，其两段宽度之和不超过整个 query，不会溢出。 */
+  /* Ordered bracket widths sum to no more than the whole query, preventing overflow in their sum. */
   if (!ordered_clock(point) || (previous && !ordered_clock(previous))) return "clock_order";
-  /* 所有输出时间须可精确表示为 u64 ns；不能用饱和值掩盖不支持。 */
+  /* Every output duration must fit u64 nanoseconds; saturation would conceal an unsupported conversion. */
   if (!delta_ns(origin, midpoint(point), base, elapsed) ||
       !delta_ns(point->before_ticks, point->after_ticks, base, span)) return "clock_conversion";
-  /* XNU先读取lifetime peak，再由fill_task_rusage读取current；两字段并非原子快照。
-   * 查询期间分配可使current暂高于本条peak，不能据此丢弃真实样本或改写任一原值。
-   * 下方仍核同进程peak单调性，最终分别对current与peak执行严格150MB边界。 */
+  /* XNU reads lifetime peak before fill_task_rusage reads current; these fields are not an atomic snapshot.
+   * Intervening allocations can make current exceed this record's peak; neither raw value may be rewritten or discarded.
+   * Peak monotonicity is checked below, while current and peak independently obey the strict 200 MB boundary. */
   uint64_t query_uncertainty = (point->before_end_ticks - point->before_ticks) +
                                (point->after_ticks - point->after_begin_ticks);
-  /* 检查 query 内休眠；样本间休眠随后使用同域增量独立复核。 */
+  /* Check suspension inside this query; same-domain deltas separately check the interval between queries below. */
   if (!suspended_ns(point->after_ticks - point->before_ticks,
                     point->awake_after_ticks - point->awake_before_ticks,
                     query_uncertainty, base, suspension)) return "clock_conversion";
   *gap = 0;
   if (previous) {
-    /* 上一个有效样本提供同一 epoch 的间隙、时钟和 lifetime 单调性基线。 */
+    /* The previous valid sample anchors gaps, clock order, and lifetime monotonicity within the same process epoch. */
     if (midpoint(point) < midpoint(previous) ||
         point->awake_before_ticks < previous->awake_before_ticks) return "clock_order";
-    /* 同一存活 epoch 的 lifetime peak 不应下降；下降是计数器语义失败。 */
+    /* A decreasing lifetime peak in one live epoch contradicts the counter's semantics. */
     if (point->lifetime_peak_bytes < previous->lifetime_peak_bytes) return "peak_moved_backwards";
     uint64_t current_width = point->before_end_ticks - point->before_ticks;
     uint64_t previous_width = previous->before_end_ticks - previous->before_ticks;
-    /* 不可信 fixture 的极大括号同样必须失败，不能用溢出低估读取误差。 */
+    /* Extremely wide supplied brackets must also fail; overflow cannot shrink estimated read uncertainty. */
     if (UINT64_MAX - current_width < previous_width) return "clock_conversion";
     uint64_t uncertainty = current_width + previous_width;
     uint64_t gap_suspension = 0;
-    /* 转换失败与无法比较的跨样本时钟都不能留下有效 gap=0。 */
+    /* Conversion failure or incomparable cross-sample clocks cannot leave a valid zero gap. */
     if (!delta_ns(midpoint(previous), midpoint(point), base, gap) ||
         !suspended_ns(midpoint(point) - midpoint(previous),
                       point->awake_before_ticks - previous->awake_before_ticks,
                       uncertainty, base, &gap_suspension)) return "clock_conversion";
-    /* 报告 query 内和两次查询间已证明的较大休眠下界。 */
+    /* Report the larger established suspension lower bound from within and between queries. */
     if (gap_suspension > *suspension) *suspension = gap_suspension;
   }
-  /* 任意可证休眠污染整个窗口；零值仅代表没有超过读取不确定度的证据。 */
+  /* Any established suspension invalidates the window; zero means only that uncertainty hides no provable excess. */
   if (*suspension) return "suspension_observed";
-  /* 查询本身占满一个间隔时，声明频率无法成立。 */
+  /* A query longer than its interval cannot support the declared sampling frequency. */
   if (*span > interval_ns) return "query_exceeds_interval";
-  /* 不插值缺失点；绝对计划迟到还会独立拒绝不足以构成两倍 gap 的失期。 */
+  /* Missing points are not interpolated; the absolute schedule also rejects missed deadlines below the gap ceiling. */
   if (*gap > interval_ns * 2) return "sampling_gap";
-  /* 每次采样只能在声明截止点之后开始，不能用提前读取伪造末端覆盖。 */
+  /* Each sample must start at its declared deadline or later; early reads cannot certify endpoint coverage. */
   if (*elapsed < planned_ns) return "sample_before_deadline";
-  /* 迟到达到一个 interval 即缺少计划点，不能突发追赶后声称连续覆盖。 */
+  /* A full interval of lateness loses a scheduled point; burst catch-up cannot establish continuous coverage. */
   if (*elapsed > planned_ns && *elapsed - planned_ns >= interval_ns) return "missed_deadline";
   return NULL;
 }
 
-/* 固定缓冲和总字节预算使格式化、文件增长及内存所有权都有上限。 */
+/* Fixed buffers and a total byte budget bound formatting storage and output growth. */
 static bool write_record(struct writer *writer, bool footer, const char *format, ...) {
   char line[MAX_LINE_BYTES];
   va_list arguments;
@@ -361,15 +361,15 @@ static bool write_record(struct writer *writer, bool footer, const char *format,
   int size = vsnprintf(line, sizeof(line), format, arguments);
   va_end(arguments);
   uint64_t limit = MAX_OUTPUT_BYTES - (footer ? 0 : FOOTER_RESERVE);
-  /* 格式化截断或预算用尽时不写入半条新记录。 */
+  /* Reject formatting truncation or budget exhaustion before writing any part of this record. */
   if (size < 0 || (size_t)size >= sizeof(line) || writer->bytes + (uint64_t)size > limit) return false;
-  /* 实际 I/O 可产生部分文件；任何短写/flush 失败都禁止发布完整观测。 */
+  /* Real I/O can leave a partial file; any short write or flush failure prevents completion certification. */
   if (fwrite(line, 1, (size_t)size, writer->file) != (size_t)size || fflush(writer->file)) return false;
   writer->bytes += (uint64_t)size;
   return true;
 }
 
-/* header 明确区分数据有效性和整产品验收，调用者不能通过参数自封完整归属。 */
+/* The header distinguishes evidence validity from product acceptance; arguments cannot certify process membership. */
 static bool write_header(struct writer *writer, const struct options *options,
                           const mach_timebase_info_data_t *base, uint64_t origin) {
   char encoded[PROC_PIDPATHINFO_MAXSIZE * 2 + 1];
@@ -388,7 +388,7 @@ static bool write_header(struct writer *writer, const struct options *options,
     BUDGET_BYTES);
 }
 
-/* 所有内存值和 Mach ticks 使用十进制字符串，避免下游二进制浮点丢失整数精度。 */
+/* Memory counters and Mach ticks use decimal strings, preserving integer precision in downstream JSON consumers. */
 static bool write_sample(struct writer *writer, const struct point *point, uint64_t index,
                           uint64_t planned, uint64_t elapsed, uint64_t gap, uint64_t span,
                           uint64_t suspension) {
@@ -407,7 +407,7 @@ static bool write_sample(struct writer *writer, const struct point *point, uint6
     point->after_begin_ticks, point->after_ticks, point->awake_after_ticks);
 }
 
-/* 失败的原始时钟与间隙仍写入独立记录；它不进入有效样本摘要，也不能授权通过。 */
+/* Preserve failed clocks and gaps in a separate record, excluded from valid-sample aggregates and acceptance. */
 static bool write_failure(struct writer *writer, const struct point *point, uint64_t index,
                            uint64_t planned, const char *failure, uint64_t elapsed,
                            uint64_t gap, uint64_t span, uint64_t suspension) {
@@ -423,7 +423,7 @@ static bool write_failure(struct writer *writer, const struct point *point, uint
     point->after_begin_ticks, point->after_ticks, point->awake_after_ticks);
 }
 
-/* 没有完整归属和工作负载证据时，即使样本低于上限也永远不发出整产品 PASS。 */
+/* Counters below budget cannot produce a product pass without complete membership and workload evidence. */
 static bool write_footer(struct writer *writer, const struct summary *summary, bool complete,
                           const char *failure) {
   return write_record(writer, true,
@@ -439,64 +439,64 @@ static bool write_footer(struct writer *writer, const struct summary *summary, b
     complete && summary->max_lifetime < BUDGET_BYTES ? "true" : "false");
 }
 
-/* 按绝对 continuous 截止时间等待；休眠/调度迟到仍由采样有效性检查揭示。 */
+/* Wait against an absolute continuous-clock deadline; observation checks still expose suspension and late scheduling. */
 static bool wait_until(uint64_t origin, uint64_t target_ns, const mach_timebase_info_data_t *base) {
   for (;;) {
     uint64_t elapsed = 0;
-    /* 等待期间出现倒退或不支持的换算时，不继续等待一个错误截止点。 */
+    /* A backward clock or unsupported conversion must not continue waiting against an invalid deadline. */
     if (!delta_ns(origin, mach_continuous_time(), base, &elapsed)) return false;
-    /* 已达到唯一绝对截止点；不因 EINTR 重置整个声明时长。 */
+    /* The one absolute deadline has arrived; EINTR never restarts the full declared duration. */
     if (elapsed >= target_ns) return true;
     uint64_t remaining = target_ns - elapsed;
     struct timespec request = { .tv_sec = (time_t)(remaining / NS_PER_SECOND),
                                .tv_nsec = (long)(remaining % NS_PER_SECOND) };
-    /* 信号后重算剩余绝对时间；其他等待错误使观测无效。 */
+    /* Recompute absolute remaining time after signals; other wait errors invalidate observation. */
     if (nanosleep(&request, NULL) && errno != EINTR) return false;
   }
 }
 
-/* 仅独占创建新 0600 普通文件；不覆盖、删除或跟随既存最终路径。 */
+/* Exclusively create a new 0600 regular file, without overwriting, deleting, or following an existing final path. */
 static FILE *create_output(const char *path) {
   int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-  /* 创建失败时没有本工具拥有的新文件，绝不删除操作者的既存路径。 */
+  /* Creation failure acquires no new file owner; never delete the caller's preexisting path. */
   if (fd < 0) return NULL;
   struct stat info;
   if (fstat(fd, &info) || !S_ISREG(info.st_mode) || info.st_nlink != 1) {
-    /* 非独占普通文件不能写入；只关闭刚取得的描述符，不按名字清理。 */
+    /* A nonexclusive regular-file identity cannot be written; close only the acquired descriptor, without pathname cleanup. */
     close(fd);
     return NULL;
   }
   FILE *output = fdopen(fd, "w");
-  /* fdopen 尚未接管时由本层关闭；失败留下的新空文件是无效观测。 */
+  /* Close the descriptor if fdopen has not taken ownership; a new empty file left on failure is invalid evidence. */
   if (!output) close(fd);
   return output;
 }
 
-/* 标量摘要只在一个身份验证且有效的样本写出后推进。 */
+/* Advance scalar aggregates only after writing one complete identity-validated sample. */
 static void accumulate(struct summary *summary, const struct point *point, uint64_t gap, uint64_t span) {
   ++summary->records;
-  /* 分别保留 current、lifetime 和有效采样质量的 MAX，不能把它们混成同一峰值。 */
+  /* Keep current, lifetime, and sampling-quality maxima separate; they represent different observations. */
   if (point->current_bytes > summary->max_current) summary->max_current = point->current_bytes;
   if (point->lifetime_peak_bytes > summary->max_lifetime) summary->max_lifetime = point->lifetime_peak_bytes;
   if (gap > summary->max_gap_ns) summary->max_gap_ns = gap;
   if (span > summary->max_query_ns) summary->max_query_ns = span;
 }
 
-/* 无权限提升、task port、coalition 猜测、GUI 或目标进程启动路径。 */
+/* This entry point never elevates permissions, obtains task ports, guesses coalitions, opens GUI, or starts its target. */
 int main(int argc, char **argv) {
   if (argc == 2 && !strcmp(argv[1], "--help")) {
-    /* 说明路径在身份、时钟和权限检查前结束，不查询目标进程。 */
+    /* Help returns before identity, clock, and permission checks, with no target-process query. */
     usage();
     return 0;
   }
   struct options options;
   if (!parse_options(argc, argv, &options)) {
-    /* 参数拒绝发生于任何查询和文件创建之前。 */
+    /* Argument rejection precedes every target query and output creation. */
     fputs("invalid memory sampler arguments; use --help\n", stderr);
     return EXIT_USAGE;
   }
   if (getuid() == 0 || geteuid() != getuid()) {
-    /* 不把 root 或 setuid 环境当成普通用户观测的替代。 */
+    /* Root and setuid execution cannot substitute for an ordinary-user observation. */
     fputs("memory sampler requires an ordinary non-elevated user\n", stderr);
     return EXIT_INVALID;
   }
@@ -505,12 +505,12 @@ int main(int argc, char **argv) {
   struct point first;
   if (mach_timebase_info(&base) != KERN_SUCCESS || !base.numer || !base.denom ||
       !capture_point(options.expected.pid, &first) || !ordered_clock(&first)) {
-    /* 第一个身份/时钟读取失败时尚未拥有输出文件。 */
+    /* Initial identity or clock failure occurs before acquiring an output file. */
     fputs("target identity or rusage observation unavailable\n", stderr);
     return EXIT_INVALID;
   }
   if (options.identify) {
-    /* 身份输出不是内存验收；本模式不创建任何输出文件。 */
+    /* Identity output establishes no memory acceptance and creates no observation file. */
     char encoded[PROC_PIDPATHINFO_MAXSIZE * 2 + 1];
     path_hex(first.identity.executable, encoded);
     printf("{\"scope\":\"single_pid_identity\",\"membership\":\"unverified\",\"pid\":%d,\"uid\":%u,"
@@ -521,13 +521,13 @@ int main(int argc, char **argv) {
     return ferror(stdout) ? EXIT_IO : 0;
   }
   if (!same_identity(&first.identity, &options.expected)) {
-    /* identify 与 sample 之间 PID 复用、exec 或 UID 变化不能自动重新授权。 */
+    /* PID reuse, exec, or UID change between identify and sample cannot automatically authorize a replacement target. */
     fputs("selected target identity does not match\n", stderr);
     return EXIT_INVALID;
   }
   FILE *output = create_output(options.output);
   if (!output) {
-    /* 输出不能独占创建就停止，不换一个静默路径或覆盖既存文件。 */
+    /* Failed exclusive creation stops the run, without selecting a silent alternate path or overwriting an existing file. */
     fputs("cannot exclusively create private output\n", stderr);
     return EXIT_IO;
   }
@@ -535,18 +535,18 @@ int main(int argc, char **argv) {
   struct summary summary = {0};
   const char *failure = NULL;
   uint64_t origin = midpoint(&first);
-  /* header 必须先完整写出；失败不再采样，但仍尝试有限错误 footer。 */
+  /* The header must complete first; failure stops sampling but still attempts a bounded failure footer. */
   if (!write_header(&writer, &options, &base, origin)) failure = "output_failure";
   struct point previous = {0};
   for (uint64_t index = 0; !failure && index < options.planned_records; ++index) {
-    /* 最后一个截止点精确落在声明时长，而非向上延长成另一工作负载。 */
+    /* The final deadline equals the declared duration instead of rounding up into a different workload window. */
     uint64_t planned = index * options.interval_ns;
     if (planned > options.duration_ns) planned = options.duration_ns;
     struct point point = index ? (struct point){0} : first;
     uint64_t elapsed = 0, gap = 0, span = 0, suspension = 0;
     if (index && (!wait_until(origin, planned, &base) ||
                   !capture_point(options.expected.pid, &point))) {
-      /* 缺样保留实际已取得的原始字段；零值表示相应阶段未完成，而不是零内存。 */
+      /* Preserve fields actually obtained on missing samples; zero marks an unfinished capture stage, not zero memory. */
       failure = "sample_unavailable";
       (void)write_failure(&writer, &point, index, planned, failure, elapsed, gap, span, suspension);
       break;
@@ -555,12 +555,12 @@ int main(int argc, char **argv) {
                              origin, planned, options.interval_ns, &base,
                              &elapsed, &gap, &span, &suspension);
     if (failure) {
-      /* 无效样本不能更新 MAX 或记录数；footer 的 complete 保持 false。 */
+      /* Invalid samples cannot advance maxima or counts; the footer remains incomplete. */
       (void)write_failure(&writer, &point, index, planned, failure, elapsed, gap, span, suspension);
       break;
     }
     if (!write_sample(&writer, &point, index, planned, elapsed, gap, span, suspension)) {
-      /* 未完整写出的点不进入摘要；文件可能有部分行，离线复核必然拒绝。 */
+      /* A partly written point cannot enter aggregates; offline verification rejects the possible partial line. */
       failure = "output_failure";
       break;
     }
@@ -568,15 +568,15 @@ int main(int argc, char **argv) {
     previous = point;
   }
   bool complete = !failure && summary.records == options.planned_records;
-  /* footer 和 close 都完成后才能发布有限范围的退出状态；不宣称断电持久性。 */
+  /* Publish scoped exit status only after both footer and close finish; this does not certify crash durability. */
   bool footer_written = write_footer(&writer, &summary, complete, failure);
   bool closed = fclose(output) == 0;
-  /* I/O 失败优先于看似完整的内存数值，防止完整 footer 掩盖 fclose 错误。 */
+  /* I/O failure outranks apparently complete counters, so a written footer cannot conceal fclose failure. */
   if (!footer_written || !closed) return EXIT_IO;
-  /* 任何缺样或语义失败保留非通过状态，不将未见峰值视为低于预算。 */
+  /* Missing samples and semantic failures cannot treat an unseen peak as within budget. */
   if (!complete) return EXIT_INVALID;
-  /* 已知 lifetime 超限也保留失败，但不会把其发生时间标成本区间。 */
+  /* A known lifetime exceedance fails the budget without claiming that its peak occurred inside this observation window. */
   if (summary.max_current >= BUDGET_BYTES || summary.max_lifetime >= BUDGET_BYTES) return EXIT_BUDGET;
-  /* 单 PID 记录再完整也不能证明 whole-product membership。 */
+  /* A complete single-PID sequence still cannot establish whole-product membership. */
   return EXIT_MEMBERSHIP_UNVERIFIED;
 }

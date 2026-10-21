@@ -8,6 +8,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+// Historical standalone piece-table floor comparison, not the production Markdown plugin.
+// It has simplified monospaced painting, navigation and lifecycle semantics. Only caller-supplied
+// disposable fixtures may be used for diagnostics; it has no authority over the production vault.
+// The product's strict paging, shaping, undo and release evidence comes from its actual Rust path.
 static const NSUInteger kMaximumMarkdownFileBytes = 16 * 1024 * 1024;
 static const NSUInteger kOriginalMarkdownPieceBytes = 64 * 1024;
 static const NSUInteger kMaximumViewportUTF8Bytes = 256 * 1024;
@@ -41,6 +45,8 @@ static BOOL markdown_file_revision_matches(
     int descriptor, const char *path, NSUInteger expected_byte_length,
     dev_t expected_device, ino_t expected_inode,
     struct timespec expected_modification_time) {
+  // Reconcile the retained descriptor with the current real pathname before borrowing original bytes.
+  // A missing/replaced node or changed size/time cannot be accepted as the originally opened source.
   struct stat descriptor_status;
   struct stat path_status;
   if (descriptor < 0 || path == NULL ||
@@ -65,6 +71,7 @@ static BOOL markdown_file_revision_matches(
 
 static NSError *omni_markdown_model_error(NSInteger code,
                                           NSString *description) {
+  // Errors belong to this comparison domain and never map to product or SDK error identities.
   return [NSError errorWithDomain:@"com.omni.native-markdown-floor"
                              code:code
                          userInfo:@{NSLocalizedDescriptionKey : description}];
@@ -74,6 +81,7 @@ static BOOL decode_markdown_utf8_scalar(const uint8_t *bytes, NSUInteger length,
                                         NSUInteger offset,
                                         NSUInteger *scalarByteLength,
                                         NSUInteger *scalarUTF16Length) {
+  // Decode one exact scalar while counting both UTF-8 bytes and AppKit UTF-16 units.
   if (offset >= length) {
     return NO;
   }
@@ -86,6 +94,7 @@ static BOOL decode_markdown_utf8_scalar(const uint8_t *bytes, NSUInteger length,
   }
 
   NSUInteger width = 0;
+  // Admit only canonical lead-byte ranges; continuation bytes cannot start a scalar.
   if (first >= 0xc2 && first <= 0xdf) {
     width = 2;
   } else if (first >= 0xe0 && first <= 0xef) {
@@ -99,6 +108,7 @@ static BOOL decode_markdown_utf8_scalar(const uint8_t *bytes, NSUInteger length,
     return NO;
   }
   for (NSUInteger continuation = 1; continuation < width; continuation += 1) {
+    // Every required continuation must remain inside the caller's live byte slice.
     if ((bytes[offset + continuation] & 0xc0) != 0x80) {
       return NO;
     }
@@ -107,6 +117,7 @@ static BOOL decode_markdown_utf8_scalar(const uint8_t *bytes, NSUInteger length,
       (first == 0xed && bytes[offset + 1] >= 0xa0) ||
       (first == 0xf0 && bytes[offset + 1] < 0x90) ||
       (first == 0xf4 && bytes[offset + 1] >= 0x90)) {
+    // Exclude overlong encodings, surrogate scalars and values beyond Unicode's maximum.
     return NO;
   }
 
@@ -117,6 +128,7 @@ static BOOL decode_markdown_utf8_scalar(const uint8_t *bytes, NSUInteger length,
 
 static BOOL measure_markdown_utf8(const uint8_t *bytes, NSUInteger length,
                                   OmniMarkdownTextMetrics *metrics) {
+  // Accumulate scalar/line metadata without allocating a decoded whole-string mirror.
   NSUInteger offset = 0;
   NSUInteger utf16_length = 0;
   NSUInteger newline_count = 0;
@@ -143,6 +155,7 @@ static BOOL markdown_byte_offset_for_utf16(const uint8_t *bytes,
                                            NSUInteger length,
                                            NSUInteger requestedUTF16Offset,
                                            NSUInteger *byteOffset) {
+  // Translate an exact UTF-16 boundary; landing inside an astral scalar is a rejected edit/read.
   NSUInteger current_byte = 0;
   NSUInteger current_utf16 = 0;
   while (current_byte < length && current_utf16 < requestedUTF16Offset) {
@@ -166,6 +179,7 @@ static BOOL markdown_byte_offset_for_utf16(const uint8_t *bytes,
 
 static void append_markdown_piece(NSMutableData *pieceStorage,
                                   OmniMarkdownPiece piece) {
+  // Empty edits create no piece. Adjacent source spans merge without copying their source bytes.
   if (piece.byteLength == 0 && piece.utf16Length == 0) {
     return;
   }
@@ -219,6 +233,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
 
 - (nullable instancetype)initWithFileSystemRepresentation:(const char *)path
                                                      error:(NSError **)error {
+  // Retain one original read-only descriptor and append-only edit storage for this standalone session.
   self = [super init];
   if (self == nil) {
     return nil;
@@ -228,6 +243,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
   _pieceStorage = [[NSMutableData alloc] init];
 
   int descriptor = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  // A final-component symlink is not an original-file authority; failed acquisition owns no descriptor.
   if (descriptor < 0) {
     if (error != NULL) {
       *error = omni_markdown_model_error(1, @"The Markdown file could not be opened.");
@@ -236,6 +252,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
   }
 
   struct stat file_status;
+  // Bound this historical control to finite regular files before it constructs any mapping or index.
   if (fstat(descriptor, &file_status) != 0 ||
       !S_ISREG(file_status.st_mode) || file_status.st_size < 0 ||
       (uint64_t)file_status.st_size > (uint64_t)kMaximumMarkdownFileBytes) {
@@ -248,6 +265,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
   }
 
   _originalFileDescriptor = descriptor;
+  // Transfer the descriptor only after its initial type/size checks, then reconcile its pathname identity.
   _originalByteLength = (NSUInteger)file_status.st_size;
   _originalDevice = file_status.st_dev;
   _originalInode = file_status.st_ino;
@@ -268,11 +286,14 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
   }
 
   if (_originalByteLength == 0) {
+    // An empty source needs one logical line but no zero-length mmap, which the kernel rejects.
     _utf16Length = 0;
     _lineCount = 1;
     return self;
   }
 
+  // This old comparison scans a temporary full virtual mapping to build metadata. It is not
+  // the production plugin's bounded mapped-window/index implementation or its memory proof.
   void *mapped_file = mmap(NULL, _originalByteLength, PROT_READ, MAP_PRIVATE,
                            _originalFileDescriptor, 0);
   if (mapped_file == MAP_FAILED) {
@@ -290,6 +311,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
   NSUInteger piece_start = 0;
   OmniMarkdownTextMetrics piece_metrics = {0, 0};
   BOOL valid_utf8 = YES;
+  // Record scalar-complete original spans; no borrowed pointer survives the temporary mapping below.
   while (byte_offset < _originalByteLength) {
     NSUInteger scalar_byte_length = 0;
     NSUInteger scalar_utf16_length = 0;
@@ -331,6 +353,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
   BOOL revision_unchanged = markdown_file_revision_matches(
       _originalFileDescriptor, _originalPathBytes.bytes, _originalByteLength,
       _originalDevice, _originalInode, _originalModificationTime);
+  // Release the scan mapping before returning either malformed-source or changed-revision failure.
   (void)madvise(mapped_file, _originalByteLength, MADV_DONTNEED);
   munmap(mapped_file, _originalByteLength);
   if (!revision_unchanged) {
@@ -352,6 +375,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
   }
 
   const OmniMarkdownPiece *pieces = _pieceStorage.bytes;
+  // Sum only stored piece metadata, preserving one terminal line after the final newline.
   NSUInteger piece_count = _pieceStorage.length / sizeof(OmniMarkdownPiece);
   NSUInteger newline_count = 0;
   for (NSUInteger index = 0; index < piece_count; index += 1) {
@@ -363,22 +387,26 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
 }
 
 - (void)dealloc {
+  // The document alone owns the original descriptor; transient range mappings have separate callers.
   if (_originalFileDescriptor >= 0) {
     close(_originalFileDescriptor);
   }
 }
 
 - (NSUInteger)utf16Length {
+  // AppKit coordinates refer to the edited logical sequence, not original UTF-8 byte offsets.
   return _utf16Length;
 }
 
 - (NSUInteger)lineCount {
+  // This comparison counts LF line boundaries; it does not implement production block/layout semantics.
   return _lineCount;
 }
 
 - (BOOL)mapOriginalRange:(NSRange)range
                   mapping:(OmniMarkdownFileMapping *)mapping
                     error:(NSError **)error {
+  // Initialize an empty lease so every error leaves the caller with nothing to unmap.
   mapping->base = NULL;
   mapping->mappedLength = 0;
   mapping->bytes = NULL;
@@ -405,6 +433,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
   }
 
   long page_size_value = sysconf(_SC_PAGESIZE);
+  // Kernel mapping offsets must be page-aligned; retain the leading-byte displacement separately.
   if (page_size_value <= 0) {
     if (error != NULL) {
       *error = omni_markdown_model_error(8, @"The virtual-memory page size is unavailable.");
@@ -428,6 +457,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
           _originalByteLength, _originalDevice, _originalInode,
           _originalModificationTime)) {
     munmap(base, mapped_length);
+    // A revision change during acquisition revokes this new lease before any source pointer escapes.
     if (error != NULL) {
       *error = omni_markdown_model_error(
           10, @"The Markdown file changed while the viewport was mapped.");
@@ -442,6 +472,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
 }
 
 - (void)unmapOriginalMapping:(OmniMarkdownFileMapping *)mapping {
+  // Return only this lease's actual mapping and clear all exposed pointers, including empty leases.
   if (mapping->base != NULL) {
     (void)madvise(mapping->base, mapping->mappedLength, MADV_DONTNEED);
     munmap(mapping->base, mapping->mappedLength);
@@ -455,6 +486,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
                   bytes:(const uint8_t **)bytes
                 mapping:(OmniMarkdownFileMapping *)mapping
                   error:(NSError **)error {
+  // Original pieces acquire a scoped map; session additions borrow this document's append-only storage.
   mapping->base = NULL;
   mapping->mappedLength = 0;
   mapping->bytes = NULL;
@@ -481,6 +513,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
           localUTF16Range:(NSRange)localRange
                   storage:(NSMutableData *)storage
                     error:(NSError **)error {
+  // Derive a metadata-only subpiece after checking both scalar boundaries in one live source lease.
   const uint8_t *bytes = NULL;
   OmniMarkdownFileMapping mapping = {0};
   if (![self bytesForPiece:piece bytes:&bytes mapping:&mapping error:error]) {
@@ -506,6 +539,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
   OmniMarkdownTextMetrics metrics = {0, 0};
   BOOL metrics_valid = measure_markdown_utf8(bytes + start_byte,
                                              end_byte - start_byte, &metrics);
+  // Metadata no longer needs source bytes; release the lease before error propagation or piece publication.
   [self unmapOriginalMapping:&mapping];
   if (!metrics_valid) {
     if (error != NULL) {
@@ -527,6 +561,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
 - (BOOL)replaceUTF16Range:(NSRange)range
                   withText:(NSString *)text
                      error:(NSError **)error {
+  // Prepare replacement metadata off to the side; the original piece sequence stays authoritative on failure.
   if (range.location > _utf16Length ||
       range.length > _utf16Length - range.location) {
     if (error != NULL) {
@@ -536,6 +571,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
   }
   NSData *inserted_utf8 = [text dataUsingEncoding:NSUTF8StringEncoding
                               allowLossyConversion:NO];
+  // Only inserted text is encoded; original document bytes remain descriptor-backed piece spans.
   if (inserted_utf8 == nil) {
     if (error != NULL) {
       *error = omni_markdown_model_error(15, @"The inserted text is not valid Unicode.");
@@ -552,6 +588,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
   }
 
   NSUInteger addition_rollback_length = _sessionAdditionBytes.length;
+  // Failed prefix/suffix slicing rolls the append-only edit buffer back to this exact prior length.
   OmniMarkdownPiece inserted_piece = {
       .source = OmniMarkdownPieceSourceSessionAddition,
       .sourceOffset = addition_rollback_length,
@@ -572,6 +609,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
   NSUInteger global_utf16 = 0;
   BOOL inserted = NO;
 
+  // Preserve nonoverlapping old pieces, split only the intersected boundaries, and insert new text once.
   for (NSUInteger index = 0; index < old_piece_count; index += 1) {
     OmniMarkdownPiece piece = old_pieces[index];
     NSUInteger piece_start = global_utf16;
@@ -619,6 +657,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
   }
 
   _pieceStorage = new_piece_storage;
+  // Publish the completed replacement only after every borrowed slice has been validated and unmapped.
   _utf16Length = _utf16Length - range.length + inserted_metrics.utf16Length;
   NSUInteger newline_count = 0;
   const OmniMarkdownPiece *new_pieces = _pieceStorage.bytes;
@@ -636,6 +675,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
               toData:(NSMutableData *)data
      appendedUTF16Length:(NSUInteger *)appendedUTF16Length
                error:(NSError **)error {
+  // Copy only scalar-complete bytes within the remaining caller budget, returning the actual UTF-16 extent.
   const uint8_t *piece_bytes = NULL;
   OmniMarkdownFileMapping mapping = {0};
   if (![self bytesForPiece:piece
@@ -665,6 +705,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
   NSUInteger accepted_bytes = 0;
   NSUInteger accepted_utf16 = 0;
   while (accepted_bytes < slice_length && accepted_bytes < byteBudget) {
+    // A scalar exceeding the last budget bytes ends the prefix without splitting its encoding.
     NSUInteger scalar_byte_length = 0;
     NSUInteger scalar_utf16_length = 0;
     if (!decode_markdown_utf8_scalar(slice_bytes, slice_length, accepted_bytes,
@@ -694,6 +735,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
                                 byteBudget:(NSUInteger)byteBudget
                          actualUTF16Length:(NSUInteger *)actualUTF16Length
                                      error:(NSError **)error {
+  // The returned string is budget-limited even when the requested logical range spans the document.
   if (range.location > _utf16Length ||
       range.length > _utf16Length - range.location) {
     if (error != NULL) {
@@ -711,6 +753,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
        index < piece_count && appended_utf16 < range.length &&
        utf8.length < byteBudget;
        index += 1) {
+    // Skip nonintersecting metadata and debit one shared byte ceiling across every contributing piece.
     OmniMarkdownPiece piece = pieces[index];
     NSUInteger piece_start = global_utf16;
     NSUInteger piece_end = piece_start + piece.utf16Length;
@@ -750,6 +793,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
 }
 
 - (NSUInteger)utf16OffsetForLine:(NSUInteger)line {
+  // Skip pieces by newline counts, then inspect only the piece containing the requested LF boundary.
   if (line == 0) {
     return 0;
   }
@@ -809,6 +853,7 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
 - (void)getLine:(NSUInteger *)line
       utf16Column:(NSUInteger *)column
     forUTF16Offset:(NSUInteger)offset {
+  // Locate the bounded logical position with metadata plus one piece scan, then derive its UTF-16 column.
   NSUInteger bounded_offset = MIN(offset, _utf16Length);
   const OmniMarkdownPiece *pieces = _pieceStorage.bytes;
   NSUInteger piece_count = _pieceStorage.length / sizeof(OmniMarkdownPiece);
@@ -861,12 +906,14 @@ static void append_markdown_piece(NSMutableData *pieceStorage,
 @end
 
 static int markdown_model_self_test_failure(NSString *reason) {
+  // This standalone failure status concerns the comparison model, never full native product acceptance.
   fprintf(stderr, "Markdown model self-test failed: %s\n", reason.UTF8String);
   return 1;
 }
 
 static int run_markdown_model_self_tests(const char *fixture_path,
                                          const char *executable_path) {
+  // Use a caller-owned tiny synthetic Unicode file to exercise actual mappings and piece edits.
   NSError *error = nil;
   OmniMappedMarkdownDocument *document = [[OmniMappedMarkdownDocument alloc]
       initWithFileSystemRepresentation:fixture_path
@@ -896,6 +943,7 @@ static int run_markdown_model_self_tests(const char *fixture_path,
                          withText:@"x"
                             error:&error] ||
       error.code != 12) {
+    // The requested insertion lands inside the fixture's astral scalar and must remain rejected.
     return markdown_model_self_test_failure(
         @"An edit split a UTF-16 surrogate pair.");
   }
@@ -917,6 +965,7 @@ static int run_markdown_model_self_tests(const char *fixture_path,
                byteBudget:2
         actualUTF16Length:&actual_utf16_length
                     error:&error];
+  // A two-byte ceiling may return the ASCII prefix but cannot include part of the following emoji.
   if (budgeted_text == nil || ![budgeted_text isEqualToString:@"A"] ||
       actual_utf16_length != 1) {
     return markdown_model_self_test_failure(
@@ -933,6 +982,7 @@ static int run_markdown_model_self_tests(const char *fixture_path,
       ![document replaceUTF16Range:NSMakeRange(document.utf16Length, 0)
                           withText:@"尾\n"
                              error:&error]) {
+    // These actual edits cross original/addition pieces without replacing the source fixture on disk.
     return markdown_model_self_test_failure(error.localizedDescription);
   }
 
@@ -977,6 +1027,7 @@ static int run_markdown_model_self_tests(const char *fixture_path,
   }
 
   int fixture_descriptor = open(fixture_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  // Reconcile one real descriptor with its source path and reject the unrelated executable path.
   struct stat fixture_status;
   if (fixture_descriptor < 0 ||
       fstat(fixture_descriptor, &fixture_status) != 0) {
@@ -1019,6 +1070,7 @@ static int run_markdown_model_self_tests(const char *fixture_path,
 
 - (instancetype)initWithFrame:(NSRect)frame
                       document:(OmniMappedMarkdownDocument *)document {
+  // Own this comparison's document and finite drawing attributes; no hidden TextKit editor is constructed.
   self = [super initWithFrame:frame];
   if (self != nil) {
     _document = document;
@@ -1038,24 +1090,29 @@ static int run_markdown_model_self_tests(const char *fixture_path,
 }
 
 - (BOOL)isFlipped {
+  // Use top-origin rows consistently for this control's drawing, hit tests and approximate caret.
   return YES;
 }
 
 - (BOOL)isOpaque {
+  // The surrounding native window supplies its background; the comparison does not cover every dirty pixel.
   return NO;
 }
 
 - (BOOL)acceptsFirstResponder {
+  // AppKit may deliver real text-input callbacks only after this concrete view takes focus.
   return YES;
 }
 
 - (NSUInteger)visibleLineCapacity {
+  // Retain at least one logical row for a short window; this is fixed-height comparison geometry.
   CGFloat available_height = MAX(1.0, self.bounds.size.height - 32.0);
   return MAX((NSUInteger)1,
              (NSUInteger)floor(available_height / self.lineHeight));
 }
 
 - (void)refreshDocumentGeometry {
+  // Clamp scrolling after an edit shrinks the line count, without materializing document text.
   NSUInteger visible_line_capacity = [self visibleLineCapacity];
   NSUInteger maximum_first_line =
       self.document.lineCount > visible_line_capacity
@@ -1065,6 +1122,7 @@ static int run_markdown_model_self_tests(const char *fixture_path,
 }
 
 - (NSRange)boundedReplacementRange:(NSRange)requestedRange {
+  // An unspecified native range targets composition or selection; stale extents clamp in this old control.
   NSRange candidate = requestedRange;
   if (candidate.location == NSNotFound) {
     candidate = self.markedTextRange.location == NSNotFound
@@ -1081,6 +1139,7 @@ static int run_markdown_model_self_tests(const char *fixture_path,
 }
 
 - (NSString *)plainTextFromInput:(id)input {
+  // Accept only public plain/attributed string payloads, discarding styling from this plain-text comparison.
   if ([input isKindOfClass:NSAttributedString.class]) {
     return ((NSAttributedString *)input).string;
   }
@@ -1091,6 +1150,7 @@ static int run_markdown_model_self_tests(const char *fixture_path,
 }
 
 - (void)refreshAfterEdit {
+  // Keep the current selection's line in view, then invalidate only the comparison caret's coordinates.
   [self refreshDocumentGeometry];
   self.needsDisplay = YES;
   NSUInteger line = 0;
@@ -1115,6 +1175,7 @@ static int run_markdown_model_self_tests(const char *fixture_path,
 }
 
 - (void)insertText:(id)input replacementRange:(NSRange)replacementRange {
+  // Commit through the actual comparison document first; failure preserves selection and composition.
   NSString *inserted_text = [self plainTextFromInput:input];
   NSRange bounded_range = [self boundedReplacementRange:replacementRange];
   if (![self.document replaceUTF16Range:bounded_range
@@ -1136,6 +1197,7 @@ static int run_markdown_model_self_tests(const char *fixture_path,
 - (void)setMarkedText:(id)input
          selectedRange:(NSRange)selectedRange
        replacementRange:(NSRange)replacementRange {
+  // Provisional text replaces the declared target; the input method's relative selection stays inside it.
   NSString *marked_text = [self plainTextFromInput:input];
   NSRange bounded_range = [self boundedReplacementRange:replacementRange];
   if (![self.document replaceUTF16Range:bounded_range
@@ -1155,24 +1217,29 @@ static int run_markdown_model_self_tests(const char *fixture_path,
 }
 
 - (void)unmarkText {
+  // End provisional marking without deleting the text already represented by document pieces.
   self.markedTextRange = NSMakeRange(NSNotFound, 0);
   self.needsDisplay = YES;
 }
 
 - (BOOL)hasMarkedText {
+  // NSNotFound identifies no composition independently from whether its current length is zero.
   return self.markedTextRange.location != NSNotFound;
 }
 
 - (NSRange)selectedRange {
+  // Return edited-document UTF-16 coordinates, never an original backing-file byte range.
   return self.selectedTextRange;
 }
 
 - (NSRange)markedRange {
+  // Return the comparison's exact provisional range for the public NSTextInputClient protocol.
   return self.markedTextRange;
 }
 
 - (nullable NSAttributedString *)attributedSubstringForProposedRange:(NSRange)range
                                                           actualRange:(NSRangePointer)actualRange {
+  // Input context reads share a fixed byte ceiling; explicitly report any shorter returned UTF-16 prefix.
   NSRange bounded_range = [self boundedReplacementRange:range];
   NSUInteger actual_length = 0;
   NSString *text = [self.document
@@ -1191,11 +1258,14 @@ static int run_markdown_model_self_tests(const char *fixture_path,
 }
 
 - (NSArray<NSAttributedStringKey> *)validAttributesForMarkedText {
+  // The old direct-drawing control implements text composition without attributed marked-text styling.
   return @[];
 }
 
 - (NSRect)firstRectForCharacterRange:(NSRange)range
                           actualRange:(NSRangePointer)actualRange {
+  // This approximate monospaced anchor is a comparison limitation. It cannot certify real
+  // variable-width Chinese shaping, ligatures, bidi navigation or product candidate placement.
   NSUInteger bounded_location = MIN(range.location, self.document.utf16Length);
   NSUInteger line = 0;
   NSUInteger column = 0;
@@ -1219,6 +1289,7 @@ static int run_markdown_model_self_tests(const char *fixture_path,
 }
 
 - (NSUInteger)characterIndexForPoint:(NSPoint)point {
+  // Translate screen coordinates into this control's fixed row/column grid and clamp to its logical extent.
   NSPoint window_point = [self.window convertPointFromScreen:point];
   NSPoint local_point = [self convertPoint:window_point fromView:nil];
   NSUInteger line =
@@ -1237,6 +1308,7 @@ static int run_markdown_model_self_tests(const char *fixture_path,
 }
 
 - (void)mouseDown:(NSEvent *)event {
+  // Acquire real focus before replacing this comparison's selection with the approximate hit-test result.
   [self.window makeFirstResponder:self];
   NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
   NSPoint screen_point = [self.window convertPointToScreen:event.locationInWindow];
@@ -1248,6 +1320,7 @@ static int run_markdown_model_self_tests(const char *fixture_path,
 }
 
 - (void)keyDown:(NSEvent *)event {
+  // Only a physical Escape exits this standalone comparison. IME cancel remains a protocol command.
   if (event.keyCode == 53) {
     [NSApp terminate:nil];
     return;
@@ -1256,6 +1329,7 @@ static int run_markdown_model_self_tests(const char *fixture_path,
 }
 
 - (void)scrollWheel:(NSEvent *)event {
+  // Scroll logical rows within the existing finite document and invalidate the current native input anchor.
   CGFloat delta = event.scrollingDeltaY;
   if (fabs(delta) < 0.01) {
     return;
@@ -1281,6 +1355,8 @@ static int run_markdown_model_self_tests(const char *fixture_path,
 }
 
 - (NSRange)previousComposedCharacterRange {
+  // This old comparison inspects at most sixteen preceding UTF-16 units. It is not an
+  // unbounded-grapheme correctness guarantee or the product's streaming boundary algorithm.
   if (self.selectedTextRange.location == 0) {
     return NSMakeRange(NSNotFound, 0);
   }
@@ -1305,6 +1381,7 @@ static int run_markdown_model_self_tests(const char *fixture_path,
 }
 
 - (NSRange)nextComposedCharacterRange {
+  // Symmetric finite lookahead belongs only to this comparison; no document-sized string is returned.
   if (self.selectedTextRange.location >= self.document.utf16Length) {
     return NSMakeRange(NSNotFound, 0);
   }
@@ -1326,6 +1403,8 @@ static int run_markdown_model_self_tests(const char *fixture_path,
 }
 
 - (void)doCommandBySelector:(SEL)selector {
+  // This finite comparison command set directly edits its piece model. Product history,
+  // link actions and richer navigation remain owned exclusively by the production plugin.
   if (selector == @selector(deleteBackward:)) {
     NSRange deletion = self.selectedTextRange.length > 0
                            ? self.selectedTextRange
@@ -1369,6 +1448,7 @@ static int run_markdown_model_self_tests(const char *fixture_path,
     self.selectedTextRange = NSMakeRange(self.document.utf16Length, 0);
     [self refreshAfterEdit];
   } else if (selector == @selector(selectAll:)) {
+    // Selection is a logical range only; selecting the whole source does not read or copy its text.
     self.selectedTextRange = NSMakeRange(0, self.document.utf16Length);
     self.needsDisplay = YES;
   } else if (selector == @selector(cancelOperation:)) {
@@ -1378,6 +1458,7 @@ static int run_markdown_model_self_tests(const char *fixture_path,
 
 - (void)drawRect:(NSRect)dirtyRect {
   (void)dirtyRect;
+  // Request the visible line span under a separate UTF-8 ceiling, then split only that bounded string.
   NSUInteger first_line = self.firstVisibleLine;
   NSUInteger visible_line_count = [self visibleLineCapacity] + 1;
   NSUInteger last_line =
@@ -1391,6 +1472,7 @@ static int run_markdown_model_self_tests(const char *fixture_path,
         actualUTF16Length:&actual_length
                     error:NULL];
   if (visible_text == nil) {
+    // A changed original revision paints an explicit comparison failure rather than stale document text.
     [@"The document changed outside this editor session."
         drawAtPoint:NSMakePoint(24.0, 16.0 + (CGFloat)first_line * self.lineHeight)
      withAttributes:self.textDrawingAttributes];
@@ -1407,6 +1489,7 @@ static int run_markdown_model_self_tests(const char *fixture_path,
   }
 
   if (self.selectedTextRange.length == 0) {
+    // Paint only a collapsed comparison caret; selection highlighting is intentionally absent here.
     NSUInteger caret_line = 0;
     NSUInteger caret_column = 0;
     [self.document getLine:&caret_line
@@ -1433,10 +1516,12 @@ static int run_markdown_model_self_tests(const char *fixture_path,
 @implementation OmniMappedMarkdownWindow
 
 - (BOOL)canBecomeKeyWindow {
+  // A borderless standalone comparison still needs actual text-input focus.
   return YES;
 }
 
 - (BOOL)canBecomeMainWindow {
+  // Permit normal activation without creating title-bar controls.
   return YES;
 }
 
@@ -1453,6 +1538,7 @@ static int run_markdown_model_self_tests(const char *fixture_path,
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
   (void)notification;
+  // The delegate retains this one comparison window and its actual view/document graph.
   const NSRect window_frame = NSMakeRect(0.0, 0.0, 1180.0, 760.0);
   self.markdownWindow = [[OmniMappedMarkdownWindow alloc]
       initWithContentRect:window_frame
@@ -1468,6 +1554,7 @@ static int run_markdown_model_self_tests(const char *fixture_path,
                                window_frame.size.height)
             document:self.document];
   self.editorView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+  // Publish the completed content graph before requesting native focus or obtaining its input context.
   self.markdownWindow.contentView = self.editorView;
   [self.markdownWindow center];
   [self.markdownWindow makeKeyAndOrderFront:nil];
@@ -1479,6 +1566,7 @@ static int run_markdown_model_self_tests(const char *fixture_path,
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:
     (NSApplication *)sender {
   (void)sender;
+  // Candidate-window teardown is not a request to exit this resident standalone comparison.
   return NO;
 }
 
@@ -1486,6 +1574,7 @@ static int run_markdown_model_self_tests(const char *fixture_path,
 
 int main(int argc, const char *argv[]) {
   @autoreleasepool {
+    // The explicit tiny-fixture mode runs without a GUI; ordinary mode owns its dedicated AppKit loop.
     if (argc == 3 && strcmp(argv[1], "--self-test") == 0) {
       return run_markdown_model_self_tests(argv[2], argv[0]);
     }
@@ -1496,6 +1585,7 @@ int main(int argc, const char *argv[]) {
       return 64;
     }
     NSError *document_error = nil;
+    // Open only the caller's explicit path; this executable never resolves the production OMNI directory.
     OmniMappedMarkdownDocument *document = [[OmniMappedMarkdownDocument alloc]
         initWithFileSystemRepresentation:argv[1]
                                 error:&document_error];

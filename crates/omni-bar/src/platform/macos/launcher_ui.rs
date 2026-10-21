@@ -43,18 +43,21 @@ define_class!(
 
     impl NativeLauncherPanel {
         #[unsafe(method(canBecomeKeyWindow))]
+        /// Permit the existing nonactivating panel to acquire its native search field's keyboard focus.
         fn can_become_key_window(&self) -> bool {
             // A nonactivating panel still needs keyboard focus for its search field.
             true
         }
 
         #[unsafe(method(canBecomeMainWindow))]
+        /// Keep the floating launcher separate from the user's main document window.
         fn can_become_main_window(&self) -> bool {
             // Floating Launcher must not replace another application's main document window.
             false
         }
 
         #[unsafe(method(sendEvent:))]
+        /// Consume only an admitted launcher gesture; all other input reaches the original NSPanel route.
         fn send_event(&self, event: &NSEvent) {
             if event.r#type() == NSEventType::KeyDown && is_current_panel(self) {
                 // Snapshot immutable event/composition state once before choosing a Launcher command.
@@ -164,6 +167,7 @@ define_class!(
     // main-thread controller until editing callbacks are detached before close.
     unsafe impl NSControlTextEditingDelegate for LauncherController {
         #[unsafe(method(controlTextDidBeginEditing:))]
+        /// Observe history ownership only for this active controller's actual search field.
         fn control_text_did_begin_editing(&self, notification: &NSNotification) {
             if !is_current_controller(self) {
                 // A closed or stale controller cannot reacquire session-history authority.
@@ -185,6 +189,7 @@ define_class!(
         }
 
         #[unsafe(method(controlTextDidChange:))]
+        /// Search bounded current input after verifying the native editor still belongs to this session.
         fn control_text_did_change(&self, notification: &NSNotification) {
             if !is_current_controller(self) {
                 // A closing or expired delegate must not perform application scans or native result work.
@@ -231,6 +236,7 @@ define_class!(
     unsafe impl NSWindowDelegate for LauncherController {
         #[cfg(feature = "native-product-acceptance")]
         #[unsafe(method(windowDidBecomeKey:))]
+        /// Notify opt-in acceptance of the real key transition without granting readiness from visibility alone.
         fn window_did_become_key(&self, notification: &NSNotification) {
             if is_current_controller(self) {
                 // Match controller and notification panel against original weak identities; stale delegates cannot wake a successor.
@@ -239,6 +245,7 @@ define_class!(
         }
 
         #[unsafe(method_id(windowWillReturnFieldEditor:toObject:))]
+        /// Lend the session editor only to its active or preflight-closing original window.
         fn field_editor(&self, window: &NSWindow, client: Option<&AnyObject>) -> Option<Retained<AnyObject>> {
             if !owns_field_editor_window(self, window) {
                 // Require this Active/Closing owner's window; normal preflight resignation must not switch to an unknown editor.
@@ -250,12 +257,14 @@ define_class!(
         }
 
         #[unsafe(method_id(windowWillReturnUndoManager:))]
+        /// Supply lazy session-owned history, whose provider permanently rejects accepted-close reentry.
         fn undo_manager(&self, _window: &NSWindow) -> Option<Retained<NSUndoManager>> {
             // Create the session manager only for actual undo requests; close permanently revokes new history authority.
             self.ivars().undo.manager(&self.ivars().owned)
         }
 
         #[unsafe(method(windowShouldClose:))]
+        /// Convert native advisory close into the existing fallible foreground transition.
         fn window_should_close(&self, _window: &NSWindow) -> bool {
             // Standard native close actions must enter the host's ownership transition first.
             // Programmatic close after that claim bypasses this advisory delegate selector.
@@ -264,6 +273,7 @@ define_class!(
         }
 
         #[unsafe(method(windowWillClose:))]
+        /// Reserve exactly one deferred finalizer while the callback's graph remains owned until it returns.
         fn window_will_close(&self, _notification: &NSNotification) {
             if self.ivars().close_finalizer_scheduled.replace(true) {
                 // Duplicate will-close notifications cannot schedule a second ownership release.
@@ -277,6 +287,7 @@ define_class!(
 
     impl LauncherController {
         #[unsafe(method(activateSelection:))]
+        /// Copy the clicked bounded row into the same deferred close handoff used by Return.
         fn activate_selection(&self, sender: &AnyObject) {
             let Some(button) = sender.downcast_ref::<NSButton>() else {
                 // Ignore a foreign action sender instead of reading an unrelated object's tag.
@@ -290,6 +301,7 @@ define_class!(
         }
 
         #[unsafe(method(dismissLauncher:))]
+        /// Route the existing mouse dismissal through the active session's shared close owner.
         fn dismiss_launcher(&self, _sender: &AnyObject) {
             // Mouse dismissal and Escape use the same queue and foreground transition owner.
             self.enqueue_launcher_dismissal();
@@ -298,9 +310,12 @@ define_class!(
 );
 
 impl LauncherController {
-    /// Check Rust history state without native retain, rejecting in-flight lending/construction before logical close.
+    /// Check both native lending owners without retain, before resignation and again before close admission.
     pub(super) fn prepare_history_for_close(&self) -> Result<(), String> {
-        self.ivars().undo.prepare_close()
+        self.ivars().undo.prepare_close()?;
+        // An editor may be locally retained even when no undo manager is being provided. Its loan
+        // must finish before accepted cleanup can observe the complete native owner set.
+        self.ivars().field_editor.prepare_close()
     }
 
     /// Initialize state before registering this object as any native callback target.
@@ -867,6 +882,7 @@ impl NativeLauncherSurface {
 
     /// Borrow the preflight snapshot; every native identity was captured before callbacks/responder teardown.
     pub(super) fn release_probe(&self) -> Option<LauncherReleaseProbe> {
+        // Clone only bounded weak evidence; observation cannot extend the closing native graph's lifetime.
         self.close_observation.clone()
     }
 
@@ -1043,6 +1059,7 @@ mod readiness_tests {
 
     #[test]
     fn readiness_requires_every_input_identity_and_window_fact() {
+        // Exercise the production scalar predicate only; no synthesized fact is reported as native focus evidence.
         let ready = ready_nonactivating_panel();
         assert!(ready.is_ready());
         let mutations: [fn(&mut LauncherReadiness); 11] = [
@@ -1083,6 +1100,7 @@ impl LauncherPresentation {
         input: &Retained<NSTextField>,
         controller: &Retained<LauncherController>,
     ) -> Self {
+        // These temporary claims protect native calls only after the caller ends its global ownership borrow.
         Self {
             panel: panel.clone(),
             input: input.clone(),
@@ -1093,6 +1111,7 @@ impl LauncherPresentation {
     /// Copy weak identities before installing probe observers, without retaining an extra panel/input owner.
     #[cfg(feature = "native-acceptance")]
     pub(super) fn probe_identity(&self) -> LauncherProbeIdentity {
+        // Weak identities identify this panel/input pair without creating another foreground owner.
         LauncherProbeIdentity {
             panel: objc2::rc::Weak::from_retained(&self.panel),
             input: objc2::rc::Weak::from_retained(&self.input),

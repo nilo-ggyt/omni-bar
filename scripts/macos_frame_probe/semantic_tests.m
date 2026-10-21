@@ -54,6 +54,7 @@ static CVPixelBufferRef renderSource(NSString *text, size_t width, size_t height
   CGContextRelease(drawing);
   CGColorSpaceRelease(color);
   CVPixelBufferRef source = NULL;
+  /* The caller's release flag must outlive this returned buffer; its final CFRelease triggers the callback once. */
   CVReturn created = CVPixelBufferCreateWithBytes(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA,
       bytes, stride, releaseSource, released, NULL, &source);
   require(created == kCVReturnSuccess && source != NULL, "synthetic source publication");
@@ -104,6 +105,7 @@ static OmniFrameRecognition recognizeFixture(NSString *text) {
 int main(void) {
   @autoreleasepool {
     lifetimes = [NSMutableArray new];
+    /* Nonce grammar and literal token boundaries are pure checks, independent of Vision's actual OCR behavior below. */
     require(OmniFrameTokenIsValid(@"FRAMEZX729B"), "bounded valid nonce");
     require(OmniFrameTokenIsValid(@"测试FRAME729"), "bounded UTF-8 nonce");
     require(!OmniFrameTokenIsValid(@"\u0301\u0301\u0301\u0301"), "combining-mark-only nonce rejected");
@@ -116,6 +118,7 @@ int main(void) {
     require(!OmniFrameContainsToken(@"FRAMEZX7298", @"FRAMEZX729B"), "near-match glyph spelling rejected");
     require(!OmniFrameContainsToken(@"FRAMEZX729B\u0301", @"FRAMEZX729B"), "combining-mark suffix rejected");
 
+    /* Exact ROI geometry is a separate prerequisite; successful token recognition cannot authorize an inferred transform. */
     CGRect requested = CGRectZero;
     require(OmniFrameParseROI("10,20,256,64", &requested), "finite exact source points");
     require(!OmniFrameParseROI("nan,20,256,64", &requested), "NaN ROI rejected");
@@ -189,6 +192,7 @@ int main(void) {
       require(lifetime.handler == nil && lifetime.request == nil && lifetime.results == nil, "32-frame weak census has no actual-frame graph");
     }
     require(bootstrapLifetime.handler == nil && bootstrapLifetime.results == nil, "bootstrap remains content/image free after batch");
+    /* Exercise the production scalar sequence using actual OLD/NEW/near recognition results acquired above. */
     OmniFrameSemanticState state = {.startTicks = 100, .requiredBaselineFrames = 2};
     require(OmniFrameAdvance(&state, old, 101) == OmniFrameSemanticWaiting, "first positive baseline frame");
     require(OmniFrameAdvance(&state, old, 102) == OmniFrameSemanticBaselineReady, "consecutive positive baseline ready");

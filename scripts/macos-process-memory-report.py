@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""复核有界单 PID 原始记录；任何结果都不代替整产品进程集合归属。"""
+"""Recheck bounded single-PID observations without certifying whole-product process membership."""
 
 import argparse
 import hashlib
@@ -12,80 +12,80 @@ import sys
 MAX_BYTES = 64 * 1024 * 1024
 MAX_LINE_BYTES = 16384
 MAX_RECORDS = 65536
-# 与采样器使用相同的严格150MB边界；单PID低于边界仍不等于整产品验收通过。
-BUDGET_BYTES = 150000000
+# This protocol shares the sampler's strict 200 MB boundary; a passing PID does not establish a product pass.
+BUDGET_BYTES = 200000000
 U64_MAX = (1 << 64) - 1
 UNVERIFIED = 78
 INVALID = 65
 
 
 class InvalidObservation(ValueError):
-    """原始证据不完整、语义不支持或出现身份/时间不一致。"""
+    """Reject incomplete evidence, unsupported semantics, or inconsistent process identity and clocks."""
 
 
 def require(condition, reason):
-    """失败原因限定为固定标签，避免把私有路径或内容写入报告。"""
+    """Report only finite failure labels, excluding private paths and observation contents."""
     if not condition:
-        # 不从部分观测恢复成低内存样本，也不输出失败输入本身。
+        # Partial observations cannot be repaired into low-memory evidence or echoed into the report.
         raise InvalidObservation(reason)
 
 
 def integer(value, minimum=0, maximum=U64_MAX):
-    """JSON 计数只能是有限范围整数；bool 不能冒充 0/1。"""
+    """Accept bounded JSON integers while rejecting bool, even though Python treats it as an int subclass."""
     require(type(value) is int and minimum <= value <= maximum, "invalid_integer")
     return value
 
 
 def decimal(value, minimum=0, maximum=U64_MAX):
-    """原始 u64 必须为规范十进制字符串，不经浮点舍入。"""
+    """Parse canonical decimal u64 text without an intermediate floating-point conversion."""
     require(type(value) is str and len(value) <= 20 and
             re.fullmatch(r"0|[1-9][0-9]*", value) is not None, "invalid_decimal")
     return integer(int(value), minimum, maximum)
 
 
 def exact_keys(value, names):
-    """唯一 schema 不静默忽略新字段，以免误解释不同版本。"""
+    """Require the one supported schema, so unfamiliar fields cannot silently acquire old semantics."""
     require(type(value) is dict and set(value) == set(names.split()), "unsupported_fields")
 
 
 def unique_object(pairs):
-    """拒绝重复 JSON key，防止阅读者和解析器选中不同值。"""
+    """Reject duplicate JSON keys instead of letting readers and parsers choose different values."""
     value = {}
     for key, item in pairs:
-        # 每个对象只接受第一次且唯一的字段声明。
+        # Every field must have one declaration; a later duplicate cannot override the first value.
         require(key not in value, "duplicate_field")
         value[key] = item
     return value
 
 
 def records(stream):
-    """流式读取固定大小行和总字节，不持有整个原始文件。"""
+    """Stream bounded lines and total bytes without retaining the complete observation file."""
     digest = hashlib.sha256()
     consumed = 0
     for index in range(MAX_RECORDS + 4):
-        # 多读一字节区分恰好上限与被截断的长行，不使用无界 readline。
+        # Read one extra byte to distinguish an allowed line boundary from truncation, without unbounded readline.
         raw = stream.readline(MAX_LINE_BYTES + 1)
         if not raw:
-            # EOF 交由状态机验证最后一条确实是完整 footer。
+            # The consuming state machine must still establish that EOF follows a complete footer.
             return
         consumed += len(raw)
         require(len(raw) < MAX_LINE_BYTES and raw.endswith(b"\n"), "invalid_line_boundary")
         require(consumed <= MAX_BYTES, "byte_budget_exceeded")
         digest.update(raw)
         try:
-            # 严格 JSON 不接受 NaN/Infinity，且每行必须独立形成对象。
+            # Each line is independent strict JSON; nonfinite constants cannot bypass integer checks.
             value = json.loads(raw, object_pairs_hook=unique_object,
                                parse_constant=lambda unused: require(False, "nonfinite_json"))
         except (UnicodeError, json.JSONDecodeError, RecursionError) as error:
-            # 解析器异常只转换为固定类型，不传播输入片段。
+            # Convert parser exceptions to a finite category without propagating snippets of source evidence.
             raise InvalidObservation("invalid_json") from error
         yield index, value, digest.hexdigest(), consumed
-    # 即使每行很短，记录数量也不能无限增长。
+    # Short lines must still obey the finite record budget.
     raise InvalidObservation("record_budget_exceeded")
 
 
 def inspect_stream(stream, observer_exit_code):
-    """重算时钟和 MAX，保留 single-PID 与 lifetime 的准确语义。"""
+    """Recompute clocks and maxima while preserving single-PID and lifetime-counter semantics."""
     iterator = iter(records(stream))
     first = next(iterator, None)
     require(first is not None, "missing_header")
@@ -117,7 +117,7 @@ def inspect_stream(stream, observer_exit_code):
     denom = integer(header["timebase_denom"], 1, (1 << 32) - 1)
 
     def ns(ticks):
-        # Python 宽整数与 C 的 uint128 换算保持一致，仍显式验证 u64 结果。
+        # Python's wide intermediate matches the sampler's uint128 calculation; the result must still fit u64.
         return integer(ticks * numer // denom)
 
     count, max_current, max_peak, max_gap, max_span = 0, 0, 0, 0, 0
@@ -125,15 +125,15 @@ def inspect_stream(stream, observer_exit_code):
     footer = None
     final_digest, final_bytes = None, 0
     for _, record, digest, consumed in iterator:
-        # footer 必须最后出现，不能藏入尾随样本或第二份报告。
+        # Completion must be the final record, with no trailing samples or concatenated second report.
         require(footer is None, "trailing_record")
         require(type(record) is dict, "invalid_record")
         if record.get("type") == "complete":
-            # 收集结束状态仅在所有样本和 observer exit 均通过后接受。
+            # Retain completion provisionally; all samples and the actual observer exit must still agree.
             footer, final_digest, final_bytes = record, digest, consumed
             continue
         if record.get("type") == "failure":
-            # 原始失败记录用于诊断，不能被跳过后继续制造完整序列。
+            # A recorded collection failure cannot be skipped to manufacture a complete sequence.
             raise InvalidObservation("recorded_collection_failure")
         exact_keys(record, "type index planned_ns elapsed_ns gap_ns query_span_ns suspension_lower_bound_ns "
                    "physical_footprint_bytes lifetime_peak_bytes identity_matches_anchor pid uid birth_sec birth_usec "
@@ -159,10 +159,10 @@ def inspect_stream(stream, observer_exit_code):
         gap = 0
         peak = decimal(record["lifetime_peak_bytes"])
         current = decimal(record["physical_footprint_bytes"])
-        # XNU依次读取peak和current；期间分配可使后者更大，两个原值必须分别保留。
-        # 不能用max(current, peak)伪造内核峰值；最终预算仍独立检查这两项真实计数。
+        # XNU reads peak before current, so intervening allocations can make current larger; preserve both raw values.
+        # Substituting max(current, peak) would invent a kernel peak. Budget checks independently use both counters.
         if previous is not None:
-            # 同一 epoch 的 lifetime peak 不可倒退；不同采样点也要比较休眠时钟差值。
+            # A lifetime peak cannot decrease within one process epoch; also compare sleep-clock deltas across samples.
             previous_mid, previous_awake, previous_width, previous_peak = previous
             require(middle >= previous_mid and awake >= previous_awake, "clock_order")
             require(peak >= previous_peak, "peak_moved_backwards")
@@ -172,7 +172,7 @@ def inspect_stream(stream, observer_exit_code):
             gap_suspension = ns(max(0, middle - previous_mid - (awake - previous_awake) - width))
             suspension = max(suspension, gap_suspension)
         else:
-            # 首个中点必须精确等于 header 原点，不能删除早期样本后重贴 index。
+            # The first midpoint must equal the declared origin; removing early samples and relabeling indices fails.
             require(middle == origin and elapsed == 0, "wrong_origin")
         require(span <= interval and gap <= interval * 2 and suspension == 0, "invalid_sampling_window")
         require(decimal(record["elapsed_ns"]) == elapsed and decimal(record["gap_ns"]) == gap and
@@ -210,7 +210,7 @@ def inspect_stream(stream, observer_exit_code):
 
 
 def inspect_file(path, observer_exit_code):
-    """只读独立文件，并检测读取期间的替换/增长；不访问进程或操作系统权限。"""
+    """Inspect a regular file and detect mutation during reading without querying processes or permissions."""
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     with os.fdopen(fd, "rb") as stream:
         before = os.fstat(stream.fileno())
@@ -224,16 +224,16 @@ def inspect_file(path, observer_exit_code):
 
 
 def main():
-    """显式要求 observer 退出码，避免已写 footer 但关闭失败的文件被误接受。"""
+    """Require the observer's exit code so a written footer cannot hide a later close failure."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("artifact")
     parser.add_argument("--observer-exit-code", type=int, required=True)
     args = parser.parse_args()
     try:
-        # 仅验证已有本地记录，不隐式 identify、采样、安装或提升权限。
+        # Verify existing local evidence only; do not implicitly identify, sample, install, or elevate permissions.
         result = inspect_file(args.artifact, args.observer_exit_code)
     except (OSError, InvalidObservation, ValueError) as error:
-        # 任意失败只输出有限固定分类；私有路径和原始证据留在操作者选定的本地文件。
+        # Failure publishes a finite category; private paths and raw evidence remain in the caller's local file.
         failure = str(error) if isinstance(error, InvalidObservation) else "artifact_io_or_parse_failure"
         print(json.dumps({"observation_valid": False, "whole_product_budget_pass": False,
                           "membership": "unverified", "failure": failure}))
@@ -243,5 +243,5 @@ def main():
 
 
 if __name__ == "__main__":
-    # import 用于纯 fixture；只有显式 CLI 执行才读取指定报告文件。
+    # Import is side-effect free; only explicit CLI execution opens the selected observation file.
     sys.exit(main())

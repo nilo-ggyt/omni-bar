@@ -185,32 +185,18 @@ impl ExportRoot {
     /// Write prefix first and the completion footer last; no fallible operation follows that final write.
     fn publish(&self, encoded: &EncodedTrace) -> Result<(), ExportError> {
         let (mut file, name) = self.create_exclusive()?;
-        write_artifact(&mut file, encoded, |file| {
-            // Sync prefix/entry and verify publication before the final completion authority is written.
-            file.sync_all().map_err(|_| ExportError::Storage)?;
-            self.directory
-                .sync_all()
-                .map_err(|_| ExportError::Storage)?;
-            self.check_output(file, &name)
-        })
+        // A prefix write or sync/identity failure cannot publish completion; retain only the incomplete owned artifact.
+        file.write_all(&encoded.prefix)
+            .map_err(|_| ExportError::Storage)?;
+        file.sync_all().map_err(|_| ExportError::Storage)?;
+        self.directory
+            .sync_all()
+            .map_err(|_| ExportError::Storage)?;
+        self.check_output(&file, &name)?;
+        // The newline-terminated footer is the final write. It declines crash durability because a later sync could fail post-commit.
+        file.write_all(&encoded.footer)
+            .map_err(|_| ExportError::Storage)
     }
-}
-
-/// A complete footer includes its final newline; no fallible operation follows that last write.
-fn write_artifact<W: Write>(
-    writer: &mut W,
-    encoded: &EncodedTrace,
-    before_footer: impl FnOnce(&mut W) -> Result<(), ExportError>,
-) -> Result<(), ExportError> {
-    writer
-        .write_all(&encoded.prefix)
-        .map_err(|_| ExportError::Storage)?;
-    // Identity/sync failures leave only a prefix. A failed footer write lacks its complete newline-terminated footer.
-    before_footer(writer)?;
-    // The footer explicitly declines crash-durability certification: syncing afterward could fail post-commit.
-    writer
-        .write_all(&encoded.footer)
-        .map_err(|_| ExportError::Storage)
 }
 
 /// Serialization borrows only the already drained scalar snapshot, never an editor or native owner.
@@ -226,6 +212,7 @@ struct Evidence<'a> {
 }
 
 impl<'a> From<&'a Snapshot> for Evidence<'a> {
+    /// Borrow the drained snapshot only for serialization; the snapshot remains the sole record-storage owner.
     fn from(snapshot: &'a Snapshot) -> Self {
         // This view contains one fixed-array slice and Copy counters; it cannot prolong foreground ownership.
         Self {
@@ -445,6 +432,7 @@ define_class!(
     unsafe impl NSObjectProtocol for AcceptanceInputTraceController {}
 
     impl AcceptanceInputTraceController {
+        /// Arm only on explicit fixture action and report the finite result without retaining any recording snapshot.
         #[unsafe(method(omniAcceptanceArmSourceInputTrace:))]
         fn arm_trace(&self, _sender: Option<&AnyObject>) {
             let status = match input_trace::arm(self.mtm()) {
@@ -456,6 +444,7 @@ define_class!(
             self.ivars().status.setTitle(&NSString::from_str(status));
         }
 
+        /// Drain before filesystem work, then report publication success independently from trace validity.
         #[unsafe(method(omniAcceptanceExportSourceInputTrace:))]
         fn export_trace(&self, _sender: Option<&AnyObject>) {
             let status = match input_trace::drain(self.mtm()) {

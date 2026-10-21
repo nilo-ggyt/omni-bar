@@ -1,11 +1,11 @@
-/* 纯像素匹配与有界候选时序；真实采集、语义审计和时钟来源必须由独立适配器证明。 */
+/* Pure pixel matching and bounded candidate sequencing; a real adapter must establish capture, semantic audit, and clock provenance. */
 #include "pixel_oracle.h"
 
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* 唯一堆 owner 同时拥有三份像素和固定记录；不保存任何调用方源指针。 */
+/* One heap owner holds three pixel buffers and fixed records, retaining no caller source pointer. */
 struct OmniPixelOracle {
     OmniPixelConfig config;
     size_t source_width;
@@ -31,63 +31,63 @@ struct OmniPixelOracle {
     OmniPixelFooter footer;
 };
 
-/* 首错不可被后续成功消除；返回当前错误，同时保留最终 footer 所需的原始失败原因。 */
+/* Preserve the first failure for the footer while returning the current error; later success cannot erase it. */
 static OmniPixelStatus fail(OmniPixelOracle *oracle, OmniPixelStatus status) {
     if (oracle->failure == OMNI_PIXEL_OK) {
-        /* 只有首次失败能取得最终失败身份，迟到审计不能改写它。 */
+        /* Only the first failure acquires final failure identity; a late audit cannot replace it. */
         oracle->failure = status;
     }
     return status;
 }
 
-/* 先证明活动行和总可读范围；padding 不属于模板，但行跨度也不能溢出。 */
+/* Establish active-row width and total readable extent first; padding is excluded, but stride arithmetic must also fit. */
 static bool image_valid(OmniPixelImage image) {
     if (image.bytes == NULL || image.width == 0 || image.height == 0 || image.width > SIZE_MAX / 4U) {
-        /* 没有完整 BGRA 活动行的输入不能进入指针计算。 */
+        /* Input without one complete BGRA active row cannot enter pointer arithmetic. */
         return false;
     }
     size_t active = image.width * 4U;
     if (image.bytes_per_row < active || image.height - 1U > (SIZE_MAX - active) / image.bytes_per_row) {
-        /* 拒绝短 stride 或累计行偏移溢出，不把缺失像素解释成空白。 */
+        /* Reject short stride or cumulative offset overflow, without treating missing pixels as blank content. */
         return false;
     }
     size_t required = (image.height - 1U) * image.bytes_per_row + active;
     return required <= image.byte_count && required <= (size_t)PTRDIFF_MAX;
 }
 
-/* 减法界限避免 x+width 溢出；空或越界矩形都不参与部分匹配。 */
+/* Subtraction bounds avoid x+width overflow; empty or out-of-bounds rectangles cannot participate through partial matching. */
 static bool rect_inside(OmniPixelRect rect, size_t width, size_t height) {
     return rect.width != 0 && rect.height != 0 && rect.x <= width && rect.y <= height &&
            rect.width <= width - rect.x && rect.height <= height - rect.y;
 }
 
-/* mask 只拥有一个已验证的有限矩形；禁用时不能暗藏另一份非零配置。 */
+/* A mask declares one validated finite rectangle; a disabled mask cannot hide nonzero alternate configuration. */
 static bool mask_valid(OmniPixelMask mask, size_t width, size_t height) {
     if (mask.enabled) {
-        /* 开启的遮罩必须完全包含在 ROI 内，不能裁切成另一个未知区域。 */
+        /* An enabled mask must fit wholly within the ROI, without clipping it into another unknown region. */
         return rect_inside(mask.rect, width, height);
     }
     return mask.rect.x == 0 && mask.rect.y == 0 && mask.rect.width == 0 && mask.rect.height == 0;
 }
 
-/* x/y 已在有限 ROI 迭代中；矩形加法由创建时的包含关系证明不会溢出。 */
+/* Coordinates come from bounded ROI iteration; construction-time containment proves the rectangle additions cannot overflow. */
 static bool masked(OmniPixelMask mask, size_t x, size_t y) {
     return mask.enabled && x >= mask.rect.x && x < mask.rect.x + mask.rect.width &&
            y >= mask.rect.y && y < mask.rect.y + mask.rect.height;
 }
 
-/* 只复制配置 ROI 的活动像素；不保留父图像、padding 或源 provider。 */
+/* Copy only configured ROI active pixels, retaining neither the parent image, its padding, nor its provider. */
 static void copy_roi(uint8_t *destination, OmniPixelImage image, OmniPixelRect roi) {
     size_t row_bytes = roi.width * 4U;
     for (size_t row = 0; row < roi.height; ++row) {
-        /* image/ROI 验证保证读写都位于实际声明范围内，循环次数受 128 行上限约束。 */
+        /* Validated image/ROI bounds cover both copies, and the 128-row limit bounds iteration. */
         memcpy(destination + row * row_bytes,
                image.bytes + (roi.y + row) * image.bytes_per_row + roi.x * 4U,
                row_bytes);
     }
 }
 
-/* 所有失败构造都只释放本次 owner；调用方图像始终只是借用。 */
+/* Failed construction releases only newly acquired storage; source images remain borrowed throughout. */
 OmniPixelOracle *omni_pixel_oracle_create(OmniPixelConfig config,
                                         OmniPixelImage old_image,
                                         OmniPixelImage new_image,
@@ -95,22 +95,22 @@ OmniPixelOracle *omni_pixel_oracle_create(OmniPixelConfig config,
     OmniPixelStatus error = OMNI_PIXEL_OK;
     if (config.run_id == 0 || config.start_ticks == 0 || config.required_baseline_frames == 0 ||
         config.required_baseline_frames > 10U || config.frame_limit == 0 || config.frame_limit > OMNI_PIXEL_MAX_FRAMES) {
-        /* 不允许零身份、无起点或无界状态；这些值无法支撑后续唯一时序。 */
+        /* Zero identity, missing origin, and unbounded counts cannot establish one finite sequence. */
         error = OMNI_PIXEL_INVALID_ARGUMENT;
     } else if (!image_valid(old_image) || !image_valid(new_image) || old_image.width != new_image.width ||
                old_image.height != new_image.height || !rect_inside(config.roi, old_image.width, old_image.height) ||
                config.roi.width > OMNI_PIXEL_MAX_WIDTH || config.roi.height > OMNI_PIXEL_MAX_HEIGHT ||
                !mask_valid(config.mask, config.roi.width, config.roi.height)) {
-        /* 源几何和固定 mask 必须同时成立，不能从两张不同布局中学习一个猜测模板。 */
+        /* Both source geometry and fixed mask must agree; different layouts cannot produce a guessed shared template. */
         error = OMNI_PIXEL_INVALID_GEOMETRY;
     } else if (config.roi.width * config.roi.height * 4U > OMNI_PIXEL_MAX_OWNED_BYTES / 3U) {
-        /* 模板与候选三份都计入实际像素预算，不只报告单个 crop 的大小。 */
+        /* Count both templates and the candidate in the actual pixel budget, rather than reporting a single crop. */
         error = OMNI_PIXEL_BUDGET_EXCEEDED;
     }
     if (error != OMNI_PIXEL_OK) {
-        /* 输入拒绝不分配 owner，也不修改调用方图像。 */
+        /* Rejected inputs allocate no owner and leave caller images unchanged. */
         if (status != NULL) {
-            /* 错误输出可选，但存在时必须得到精确拒绝原因。 */
+            /* Error output is optional, but a provided slot receives the precise rejection reason. */
             *status = error;
         }
         return NULL;
@@ -118,14 +118,14 @@ OmniPixelOracle *omni_pixel_oracle_create(OmniPixelConfig config,
     OmniPixelOracle *oracle = calloc(1U, sizeof(*oracle));
     size_t bytes = config.roi.width * config.roi.height * 4U;
     if (oracle != NULL) {
-        /* 三份存储一次分配，候选空间已经预留，测量过程中不再扩容像素或记录。 */
+        /* Allocate all three buffers once, reserving the candidate so observation grows neither pixels nor records. */
         oracle->pixels = malloc(bytes * 3U);
     }
     if (oracle == NULL || oracle->pixels == NULL) {
-        /* 分配只成功一半也不能遗留 owner；没有任何源像素 owner 被转移。 */
+        /* Partial allocation must leave no new owner behind; source-pixel ownership was never transferred. */
         free(oracle);
         if (status != NULL) {
-            /* 内存耗尽是工具失败，不能降级为空模板或部分对比。 */
+            /* Allocation failure cannot degrade into an empty template or partial comparison. */
             *status = OMNI_PIXEL_ALLOCATION_FAILED;
         }
         return NULL;
@@ -140,59 +140,59 @@ OmniPixelOracle *omni_pixel_oracle_create(OmniPixelConfig config,
     copy_roi(oracle->pixels + bytes, new_image, config.roi);
     bool different = false;
     for (size_t y = 0; y < config.roi.height; ++y) {
-        /* 每个 mask 像素都按原始四字节核验，不能用阈值把差异隐藏掉。 */
+        /* Verify original four-byte pixels, including masked pixels; thresholds cannot conceal template differences. */
         for (size_t x = 0; x < config.roi.width; ++x) {
             size_t offset = (y * config.roi.width + x) * 4U;
             bool equal = memcmp(oracle->pixels + offset, oracle->pixels + bytes + offset, 4U) == 0;
             if (masked(config.mask, x, y) && !equal) {
-                /* 任一模板差异落入遮罩就拒绝整个配置，不自动缩小或移动 mask。 */
+                /* Any masked difference rejects the whole configuration, without shrinking or moving its mask. */
                 error = OMNI_PIXEL_MASK_HIDES_DIFFERENCE;
             }
             different |= !equal;
         }
     }
     if (!different && error == OMNI_PIXEL_OK) {
-        /* 相同模板不能区分 OLD/NEW，也不能支撑正向 baseline。 */
+        /* Identical templates cannot distinguish OLD from NEW or establish a positive baseline. */
         error = OMNI_PIXEL_IDENTICAL_TEMPLATES;
     }
     if (error != OMNI_PIXEL_OK) {
-        /* 未发布模板失败时释放三份分配，绝不留下可被调用的半成品。 */
+        /* Release all three unpublished buffers on template failure, leaving no callable partial owner. */
         free(oracle->pixels);
         free(oracle);
         oracle = NULL;
     }
     if (status != NULL) {
-        /* 成功与失败都明确写出结果，不依赖调用方原有错误值。 */
+        /* Publish an explicit result for success and failure, independent of the caller's previous status value. */
         *status = error;
     }
     return oracle;
 }
 
-/* 比较只忽略固定同字节区域，不做 hash-only、颜色容差、前缀或平移匹配。 */
+/* Ignore only fixed regions with equal template bytes; no hash-only, color-tolerance, prefix, or shifted matching is used. */
 OmniPixelStatus omni_pixel_oracle_classify(const OmniPixelOracle *oracle,
                                          OmniPixelImage image,
                                          OmniPixelState *state) {
     if (oracle == NULL || state == NULL) {
-        /* 缺失 owner 或结果槽不产生一个伪 UNKNOWN 成功。 */
+        /* A missing owner or output slot must not become a successful UNKNOWN classification. */
         return OMNI_PIXEL_INVALID_ARGUMENT;
     }
     if (oracle->sealed) {
-        /* finish 可以已释放模板，迟到分类不能访问原像素。 */
+        /* Finish may already have freed templates; late classification cannot access their old pixels. */
         return OMNI_PIXEL_SEALED;
     }
     if (!image_valid(image) || image.width != oracle->source_width || image.height != oracle->source_height) {
-        /* 几何变化是错误；不能把换窗、缩放或截断伪装成内容 UNKNOWN。 */
+        /* Geometry changes fail rather than disguising replacement windows, scaling, or truncation as UNKNOWN content. */
         return OMNI_PIXEL_INVALID_GEOMETRY;
     }
     bool old_equal = true;
     bool new_equal = true;
     OmniPixelRect roi = oracle->config.roi;
     for (size_t y = 0; y < roi.height; ++y) {
-        /* 每轮只读取当前已证明活动行；调用期间源像素必须稳定。 */
+        /* Read only the validated active row; callers keep source pixels stable throughout the call. */
         const uint8_t *source = image.bytes + (roi.y + y) * image.bytes_per_row + roi.x * 4U;
         for (size_t x = 0; x < roi.width; ++x) {
             if (masked(oracle->config.mask, x, y)) {
-                /* 模板在此必须相同；这只放宽固定像素比较，不能独立证明遮罩中没有文字。 */
+                /* Templates agree here; skipping this fixed region does not independently prove that it contains no text. */
                 continue;
             }
             size_t offset = (y * roi.width + x) * 4U;
@@ -204,34 +204,34 @@ OmniPixelStatus omni_pixel_oracle_classify(const OmniPixelOracle *oracle,
     return OMNI_PIXEL_OK;
 }
 
-/* 身份等值比较不用结构体 memcmp，避免 padding 或字节布局进入协议判断。 */
+/* Compare identity fields rather than struct bytes, excluding padding and layout from protocol equality. */
 static bool binding_equal(OmniPixelAuditBinding a, OmniPixelAuditBinding b) {
     return a.run_id == b.run_id && a.frame_index == b.frame_index && a.display_ticks == b.display_ticks;
 }
 
-/* 每帧推进都有限且不等待审计；任何失败都禁止以后签发有效 witness。 */
+/* Each frame advances bounded state without waiting for audit; any failure prevents later witness certification. */
 OmniPixelStatus omni_pixel_oracle_observe(OmniPixelOracle *oracle,
                                         OmniPixelFrame frame,
                                         OmniPixelImage image,
                                         OmniPixelRecord *record) {
     if (oracle == NULL) {
-        /* 没有 owner 的调用不参与时序。 */
+        /* An absent owner cannot participate in sequence advancement. */
         return OMNI_PIXEL_INVALID_ARGUMENT;
     }
     if (oracle->sealed) {
-        /* 最终 footer 已冻结，迟到 callback 不修改它或访问已释放模板。 */
+        /* The frozen footer rejects late callbacks without mutation or access to released templates. */
         return OMNI_PIXEL_SEALED;
     }
     if (record == NULL) {
-        /* 活动观测缺少记录槽属于调用错误，不能忽略这次失败后再签发有效 witness。 */
+        /* A missing record slot is an active-call failure; it cannot be ignored before certifying a later witness. */
         return fail(oracle, OMNI_PIXEL_INVALID_ARGUMENT);
     }
     if (oracle->failure != OMNI_PIXEL_OK) {
-        /* 首错保持失败，不靠后续正常帧恢复测量。 */
+        /* Preserve the first failure; later normal frames cannot restore this observation. */
         return oracle->failure;
     }
     if (oracle->count == oracle->config.frame_limit) {
-        /* 第 601 帧或更小声明上限之外的帧不能覆盖旧记录。 */
+        /* A 601st frame, or any frame beyond the smaller declared limit, cannot overwrite earlier records. */
         return fail(oracle, OMNI_PIXEL_FRAME_OVERFLOW);
     }
     uint64_t last_display = oracle->count == 0 ? oracle->config.start_ticks : oracle->records[oracle->count - 1U].frame.display_ticks;
@@ -239,35 +239,35 @@ OmniPixelStatus omni_pixel_oracle_observe(OmniPixelOracle *oracle,
     if (frame.run_id != oracle->config.run_id || frame.index != oracle->count + 1U ||
         frame.display_ticks <= last_display || frame.callback_absolute_ticks <= last_callback ||
         frame.callback_absolute_ticks < frame.display_ticks) {
-        /* 错 run、跳号、重复或倒退时间不能进入同一次观测，也不能替换最早候选。 */
+        /* A wrong run, skipped index, duplicate, or backward timestamp cannot enter this observation or replace its first candidate. */
         return fail(oracle, OMNI_PIXEL_FRAME_ORDER);
     }
     OmniPixelState state = OMNI_PIXEL_UNKNOWN;
     OmniPixelStatus classified = omni_pixel_oracle_classify(oracle, image, &state);
     if (classified != OMNI_PIXEL_OK) {
-        /* 格式/布局错误与 UNKNOWN 不同，整体失败且不增加成功帧数。 */
+        /* Format/layout failure differs from UNKNOWN; reject the observation without advancing accepted-frame count. */
         return fail(oracle, classified);
     }
     if (!oracle->baseline_ready && state == OMNI_PIXEL_NEW) {
-        /* 正向 OLD baseline 之前出现 NEW 属于预先存在，不能算一次快速输入结果。 */
+        /* NEW before a positive OLD baseline is preexisting and cannot count as a fast input result. */
         return fail(oracle, OMNI_PIXEL_PREEXISTING_NEW);
     }
     if (state == OMNI_PIXEL_UNKNOWN) {
-        /* UNKNOWN 单独计数并打断连续 OLD；候选前的不确定性永远不会被抹去。 */
+        /* Count UNKNOWN separately and interrupt consecutive OLD; uncertainty before the candidate remains permanent evidence. */
         oracle->unknown_count += 1U;
         if (!oracle->candidate_present) {
-            /* 之后的已审计 NEW 仍可成为上界 witness，但不能证明此前始终是 OLD。 */
+            /* A later audited NEW can establish an upper-bound witness, without proving that every earlier frame was OLD. */
             oracle->unknown_before_candidate += 1U;
         }
     }
     if (!oracle->baseline_ready) {
-        /* 在尚未建立 baseline 时，只认可连续、精确的 OLD 图像。 */
+        /* Until baseline is established, require consecutive exact OLD images. */
         oracle->baseline_count = state == OMNI_PIXEL_OLD ? oracle->baseline_count + 1U : 0U;
         oracle->baseline_ready = oracle->baseline_count >= oracle->config.required_baseline_frames;
     }
     bool candidate = oracle->baseline_ready && state == OMNI_PIXEL_NEW && !oracle->candidate_present;
     if (candidate) {
-        /* 候选像素与身份同在本次同步调用复制，后续分类和慢审计都不能覆盖它。 */
+        /* Copy candidate pixels and identity within this synchronous call; later classification or slow audit cannot replace them. */
         copy_roi(oracle->pixels + oracle->template_bytes * 2U, image, oracle->config.roi);
         oracle->candidate = (OmniPixelAuditBinding){frame.run_id, frame.index, frame.display_ticks};
         oracle->candidate_present = true;
@@ -278,28 +278,28 @@ OmniPixelStatus omni_pixel_oracle_observe(OmniPixelOracle *oracle,
     return OMNI_PIXEL_OK;
 }
 
-/* 只借出同一个已复制候选；调用方须让此 owner 活到审计像素借用归还。 */
+/* Lend only the copied candidate, requiring the caller to keep this owner alive until the audit loan returns. */
 OmniPixelStatus omni_pixel_oracle_audit_begin(OmniPixelOracle *oracle,
                                             OmniPixelAuditBinding *binding,
                                             OmniPixelImage *candidate) {
     if (oracle == NULL) {
-        /* 无 owner 时不创建借用。 */
+        /* No owner means no pixel loan can be created. */
         return OMNI_PIXEL_INVALID_ARGUMENT;
     }
     if (oracle->sealed) {
-        /* 已结束测量不再开启晚到审计，也不复活被释放的模板。 */
+        /* Finished observations cannot start late audits or revive released templates. */
         return OMNI_PIXEL_SEALED;
     }
     if (binding == NULL || candidate == NULL) {
-        /* 活动 owner 的缺失输出槽不能退化成一次可忽略的审计尝试。 */
+        /* Missing output slots are an active-owner failure, not an ignorable audit attempt. */
         return fail(oracle, OMNI_PIXEL_INVALID_ARGUMENT);
     }
     if (oracle->failure != OMNI_PIXEL_OK) {
-        /* 失败观测不再创建新的工作载荷。 */
+        /* Failed observation cannot create more audit work. */
         return oracle->failure;
     }
     if (!oracle->candidate_present || oracle->audit_started) {
-        /* 没有候选或第二次请求都不能构造另一个任务来替换失败/迟到的审计。 */
+        /* Neither an absent candidate nor a second request can create a replacement for a failed or delayed audit. */
         return fail(oracle, OMNI_PIXEL_AUDIT_STATE);
     }
     oracle->audit_started = true;
@@ -311,92 +311,92 @@ OmniPixelStatus omni_pixel_oracle_audit_begin(OmniPixelOracle *oracle,
     return OMNI_PIXEL_OK;
 }
 
-/* 审计结果仅消费外部声明，不能用 bool 伪装本模块已经执行过 Vision 或 native weak 检查。 */
+/* Consume external declarations only; boolean receipts do not mean this pure module performed Vision or native weak checks. */
 OmniPixelStatus omni_pixel_oracle_audit_complete(OmniPixelOracle *oracle,
                                                OmniPixelAuditBinding binding,
                                                bool expected_validated,
                                                bool frame_graph_released) {
     if (oracle == NULL) {
-        /* 无 owner 的回执无法归属任何测量。 */
+        /* A receipt without an owner cannot identify any observation. */
         return OMNI_PIXEL_INVALID_ARGUMENT;
     }
     if (oracle->sealed) {
-        /* 最终结果已冻结；迟到回执不再修改内部审计结果，像素借用只能另行归还清理。 */
+        /* Final results are frozen; late receipts cannot mutate audit facts, and pixel loans require separate return for cleanup. */
         return OMNI_PIXEL_SEALED;
     }
     if (!binding_equal(binding, oracle->candidate)) {
-        /* 错身份不能归还真正候选的权限；保留真实借用供原审计清理。 */
+        /* Wrong identity cannot acquire the real candidate's authority; preserve its actual loan for the original audit's cleanup. */
         return fail(oracle, OMNI_PIXEL_AUDIT_IDENTITY);
     }
     if (!oracle->audit_started || oracle->audit_complete || !oracle->audit_loan) {
-        /* 同一次审计只登记一次；重复或未取得借用的回执都保持失败。 */
+        /* Register an audit once; duplicate receipts or receipts without an acquired loan remain failures. */
         return fail(oracle, OMNI_PIXEL_AUDIT_STATE);
     }
     oracle->audit_complete = true;
     oracle->audit_passed = expected_validated && frame_graph_released;
     if (!oracle->audit_passed) {
-        /* 内容或释放任一未被外部证明，就不能签发 witness；借用仍须另行归还。 */
+        /* Missing external content or release evidence prevents witness certification; the loan still requires separate return. */
         (void)fail(oracle, OMNI_PIXEL_AUDIT_REJECTED);
     }
-    // 任务可以在先前观测失败后正常返回；保留清理事实，但绝不以 OK 表示测量恢复。
+    // Work can return normally after an earlier observation failure; retain cleanup facts without returning a recovered OK.
     return oracle->failure;
 }
 
-/* 仅释放模块自己的像素分配；此函数只能在不再存在候选借用时运行。 */
+/* Free only module-owned pixels, after every candidate loan has ended. */
 static void release_pixels(OmniPixelOracle *oracle) {
     free(oracle->pixels);
     oracle->pixels = NULL;
     oracle->owned_pixel_bytes = 0;
 }
 
-/* 完成回执不等于像素借用结束；把二者分开，防止异步审计仍读图时 free。 */
+/* Completion and loan return are separate, preventing free while asynchronous audit still reads the image. */
 OmniPixelStatus omni_pixel_oracle_audit_release(OmniPixelOracle *oracle,
                                               OmniPixelAuditBinding binding) {
     if (oracle == NULL) {
-        /* 无 owner 时不存在可归还租约。 */
+        /* No owner means no loan can be returned. */
         return OMNI_PIXEL_INVALID_ARGUMENT;
     }
     if (!binding_equal(binding, oracle->candidate)) {
-        /* 错 run/index/ticks 的释放不能提前归还真正候选。 */
+        /* A mismatched run/index/ticks cannot prematurely return the real candidate's loan. */
         return fail(oracle, OMNI_PIXEL_AUDIT_IDENTITY);
     }
     if (!oracle->audit_loan) {
-        /* 重复归还不改变 owner，但会阻止未结束观测得到成功结果。 */
+        /* Duplicate return keeps ownership intact but prevents a still-active observation from succeeding. */
         return fail(oracle, OMNI_PIXEL_AUDIT_STATE);
     }
     oracle->audit_loan = false;
     OmniPixelStatus result = OMNI_PIXEL_OK;
     if (!oracle->audit_complete && !oracle->sealed) {
-        /* 可显式放弃工作以清理，但没有结果的归还不能成为审计通过。 */
+        /* Explicit abandonment permits cleanup, but loan return without an audit result cannot certify success. */
         result = fail(oracle, OMNI_PIXEL_AUDIT_STATE);
     }
     if (oracle->sealed) {
-        /* 提前 finish 已固定为无效；迟到归还只完成所有权清理，不改写旧 footer。 */
+        /* Early finish already froze failure; late loan return completes cleanup without rewriting that footer. */
         release_pixels(oracle);
     }
     return result;
 }
 
-/* 冻结的是观测上界 witness，而不是输入、首次呈现、完整采集或物理 scanout 证明。 */
+/* Freeze an observed upper-bound witness, never proof of input, first presentation, complete capture, or physical scanout. */
 OmniPixelFooter omni_pixel_oracle_finish(OmniPixelOracle *oracle) {
     if (oracle == NULL) {
-        /* 没有成功创建 owner 也只能得到明确无效结果。 */
+        /* An unsuccessfully created owner can only produce an explicitly invalid result. */
         return (OmniPixelFooter){.failure = OMNI_PIXEL_INVALID_ARGUMENT};
     }
     if (oracle->sealed) {
-        /* 迟到事件和审计只可清理资源，不能让先前无效的最终记录变成有效。 */
+        /* Late events and audits may clean up, but cannot make a previously invalid final record valid. */
         return oracle->footer;
     }
     oracle->sealed = true;
     if (!oracle->candidate_present) {
-        /* OLD 或 UNKNOWN 图像本身都不是 NEW witness。 */
+        /* OLD and UNKNOWN images cannot establish a NEW witness. */
         (void)fail(oracle, OMNI_PIXEL_NO_WITNESS);
     } else if (!oracle->audit_complete || oracle->audit_loan) {
-        /* 必须先完成审计并结束全部像素借用，不能在任务还活动时写有效 footer。 */
+        /* Finish audit and all pixel loans before certifying a footer; active work cannot support completion. */
         (void)fail(oracle, OMNI_PIXEL_AUDIT_PENDING);
     }
     if (!oracle->audit_loan) {
-        /* 不再有外部像素借用时，结束模板和候选的全部真实容量，标量记录仍可导出。 */
+        /* With no external pixel loans, free all template/candidate capacity while retaining exportable scalar records. */
         release_pixels(oracle);
     }
     oracle->footer = (OmniPixelFooter){
@@ -422,38 +422,38 @@ OmniPixelFooter omni_pixel_oracle_finish(OmniPixelOracle *oracle) {
     return oracle->footer;
 }
 
-/* 导出一条标量副本，不泄露内部数组或任何图像 owner。 */
+/* Export one scalar copy, exposing neither the internal array nor an image owner. */
 bool omni_pixel_oracle_record(const OmniPixelOracle *oracle, uint32_t offset, OmniPixelRecord *record) {
     if (oracle == NULL || record == NULL || offset >= oracle->count) {
-        /* 错范围不会写输出，也不把容量未使用部分伪装成记录。 */
+        /* An invalid range leaves output unchanged and cannot present unused capacity as a record. */
         return false;
     }
     *record = oracle->records[offset];
     return true;
 }
 
-/* 只报告本模块实际分配的像素，不估计系统或未来 Vision 的内部缓存。 */
+/* Report actual module-owned pixels, without estimating system or Vision-internal caches. */
 size_t omni_pixel_oracle_owned_pixel_bytes(const OmniPixelOracle *oracle) {
     return oracle == NULL ? 0 : oracle->owned_pixel_bytes;
 }
 
-/* scalar 计数包含 owner 布局和 600 条固定记录，没有另一个可增长列表。 */
+/* Scalar bytes include the owner layout and 600 fixed records, with no separate growable list. */
 size_t omni_pixel_oracle_owned_scalar_bytes(const OmniPixelOracle *oracle) {
     return oracle == NULL ? 0 : sizeof(*oracle);
 }
 
-/* 不在析构中做审计或 IO；未归还借用时保留真实 owner，调用方必须先结束该工作。 */
+/* Destruction performs no audit or I/O; outstanding loans preserve the real owner until callers finish their work. */
 OmniPixelStatus omni_pixel_oracle_destroy(OmniPixelOracle **oracle) {
     if (oracle == NULL) {
-        /* 没有调用方 owner 槽无法安全转移释放责任。 */
+        /* Without the caller's owner slot, release responsibility cannot transfer safely. */
         return OMNI_PIXEL_INVALID_ARGUMENT;
     }
     if (*oracle == NULL) {
-        /* 空槽的幂等清理不创建状态。 */
+        /* Idempotent cleanup of an empty slot creates no state. */
         return OMNI_PIXEL_OK;
     }
     if ((*oracle)->audit_loan) {
-        /* 此拒绝也保留失败，随后正常归还只允许清理，不让早期非法释放恢复为通过。 */
+        /* Preserve this failure too; a later proper loan return permits cleanup without repairing the invalid early destruction. */
         return fail(*oracle, OMNI_PIXEL_AUDIT_PENDING);
     }
     release_pixels(*oracle);

@@ -1,4 +1,4 @@
-/* 自有合成 bytes 的纯合同测试；不读屏幕、进程、文件、系统时钟或用户内容。 */
+/* Pure contract tests use owned synthetic bytes, without reading screens, processes, files, clocks, or user content. */
 #include "pixel_oracle.h"
 
 #include <limits.h>
@@ -11,17 +11,17 @@ static unsigned int cases;
 static size_t observed_scalar_bytes;
 static size_t peak_owned_pixel_bytes;
 
-/* 每个断言只输出固定标签；失败立即结束，不能产生一个继续执行的假通过摘要。 */
+/* Assertions emit fixed labels only; immediate exit on failure prevents a later false passing summary. */
 static void require(bool value, const char *label) {
     checks += 1U;
     if (!value) {
-        /* 标签由本测试源码给定，不把像素或识别文字写入诊断。 */
+        /* Labels come from this source, keeping pixel bytes and recognized text out of diagnostics. */
         fprintf(stderr, "pixel oracle assertion failed: %s\n", label);
         exit(EXIT_FAILURE);
     }
 }
 
-/* 小图包含行 padding 和非零 ROI 原点，避免仅测试紧凑的整个 buffer。 */
+/* A small image includes row padding and a nonzero ROI origin, exercising more than compact whole-buffer input. */
 typedef struct {
     uint8_t old_bytes[160];
     uint8_t new_bytes[160];
@@ -29,7 +29,7 @@ typedef struct {
     OmniPixelConfig config;
 } Fixture;
 
-/* 所有 fixture 独立初始化，不共享可变 owner 或借用。 */
+/* Initialize each fixture independently, sharing neither mutable owners nor loans. */
 static Fixture fixture(void) {
     Fixture f = {0};
     memset(f.old_bytes, 0x55, sizeof(f.old_bytes));
@@ -46,12 +46,12 @@ static Fixture fixture(void) {
     return f;
 }
 
-/* 借用完整行范围，padding 不属于实际 ROI 像素。 */
+/* Borrow the complete row extent; padding remains outside the actual ROI pixels. */
 static OmniPixelImage image(const uint8_t *bytes) {
     return (OmniPixelImage){bytes, 160, 8, 4, 40};
 }
 
-/* 成功构造必须报告实际三份像素容量与固定 scalar 容量。 */
+/* Successful construction reports actual three-buffer pixel capacity and fixed scalar capacity. */
 static OmniPixelOracle *create(Fixture *f) {
     OmniPixelStatus status = OMNI_PIXEL_ALLOCATION_FAILED;
     OmniPixelOracle *oracle = omni_pixel_oracle_create(f->config, image(f->old_bytes), image(f->new_bytes), &status);
@@ -61,19 +61,19 @@ static OmniPixelOracle *create(Fixture *f) {
             "all 600 scalar slots included");
     observed_scalar_bytes = omni_pixel_oracle_owned_scalar_bytes(oracle);
     if (omni_pixel_oracle_owned_pixel_bytes(oracle) > peak_owned_pixel_bytes) {
-        /* 摘要使用实际 owner 计数，不把固定上限伪装成测得分配。 */
+        /* Aggregate actual owner counts, without presenting the configured ceiling as measured allocation. */
         peak_owned_pixel_bytes = omni_pixel_oracle_owned_pixel_bytes(oracle);
     }
     return oracle;
 }
 
-/* 每个 frame 使用显式合成整数 ticks；它们不被声明为真实 Mach/SCK 时间。 */
+/* Frames use explicit synthetic integer ticks, without claiming real Mach or SCK timestamps. */
 static OmniPixelFrame frame(uint32_t index) {
     return (OmniPixelFrame){17, index, 1000U + (uint64_t)index * 16667U,
                             1100U + (uint64_t)index * 16667U};
 }
 
-/* 正常输入辅助函数同时验证输出确实属于当前帧，而不是上一帧缓存。 */
+/* Accepted input also requires output identity for this frame, excluding a cached previous record. */
 static OmniPixelRecord observe(OmniPixelOracle *oracle, uint32_t index, const uint8_t *bytes) {
     OmniPixelRecord record = {0};
     require(omni_pixel_oracle_observe(oracle, frame(index), image(bytes), &record) == OMNI_PIXEL_OK,
@@ -83,32 +83,32 @@ static OmniPixelRecord observe(OmniPixelOracle *oracle, uint32_t index, const ui
     return record;
 }
 
-/* 正常归还后销毁必须清空调用方 owner，不能只清空一个计数。 */
+/* After loan return, destruction must clear the caller's owner slot instead of merely changing a count. */
 static void destroy(OmniPixelOracle **oracle) {
     require(omni_pixel_oracle_destroy(oracle) == OMNI_PIXEL_OK, "owned cleanup succeeds");
     require(*oracle == NULL, "owned cleanup empties caller slot");
 }
 
-/* 已完成审计与归还是两个阶段，测试不把外部 bool 当真实 Vision 执行证明。 */
+/* Audit completion and loan return are distinct; supplied booleans are not proof of real Vision execution. */
 static void finish_audit(OmniPixelOracle *oracle, OmniPixelAuditBinding binding, OmniPixelStatus expected) {
     require(omni_pixel_oracle_audit_complete(oracle, binding, true, true) == expected,
             "synthetic audit returns expected original failure or success");
     require(omni_pixel_oracle_audit_release(oracle, binding) == OMNI_PIXEL_OK, "audit loan explicitly returned");
 }
 
-/* 正常观测没有首错时，合成审计与显式归还共同结束候选工作。 */
+/* Without a prior failure, a supplied successful audit and explicit loan return finish candidate work. */
 static void pass_audit(OmniPixelOracle *oracle, OmniPixelAuditBinding binding) {
     finish_audit(oracle, binding, OMNI_PIXEL_OK);
 }
 
-/* 构造失败不能留下 owner，具体拒绝原因必须保留。 */
+/* Failed construction leaves no owner and preserves the specific rejection reason. */
 static void rejected(OmniPixelConfig config, OmniPixelImage old, OmniPixelImage new_image, OmniPixelStatus expected) {
     OmniPixelStatus status = OMNI_PIXEL_OK;
     OmniPixelOracle *oracle = omni_pixel_oracle_create(config, old, new_image, &status);
     require(oracle == NULL && status == expected, "invalid construction rejects exact boundary");
 }
 
-/* 独立像素反例覆盖完整 ROI、四通道、行 padding、源拷贝与 UNKNOWN。 */
+/* Pixel counterexamples cover the full ROI, all channels, row padding, source copying, and UNKNOWN classification. */
 static void exact_pixels(void) {
     cases += 1U;
     Fixture f = fixture();
@@ -119,7 +119,7 @@ static void exact_pixels(void) {
     require(omni_pixel_oracle_classify(oracle, image(f.new_bytes), &state) == OMNI_PIXEL_OK && state == OMNI_PIXEL_NEW,
             "exact NEW template");
     for (size_t y = 1; y < 3; ++y) {
-        /* 翻转 ROI 任意一位都不能被近似匹配接受，包含 alpha 字节。 */
+        /* Flipping any ROI bit, including alpha, must prevent approximate-match acceptance. */
         for (size_t x = 2; x < 6; ++x) {
             for (size_t channel = 0; channel < 4; ++channel) {
                 for (unsigned int bit = 0; bit < 8; ++bit) {
@@ -144,7 +144,7 @@ static void exact_pixels(void) {
     destroy(&oracle);
 }
 
-/* 所有尺寸和乘法反例都在读源 bytes 前拒绝，sanitizer 同时检查越界。 */
+/* Invalid sizes and multiplication boundaries must reject before reading source bytes. */
 static void geometry_and_configuration(void) {
     cases += 1U;
     Fixture f = fixture();
@@ -156,13 +156,13 @@ static void geometry_and_configuration(void) {
     bad.start_ticks = 0;
     rejected(bad, old, new_image, OMNI_PIXEL_INVALID_ARGUMENT);
     for (unsigned int kind = 0; kind < 4; ++kind) {
-        /* 四项有限计数的上下边界必须独立拒绝，不能被另一个非法字段遮蔽。 */
+        /* Test each count boundary independently so another invalid field cannot mask its rejection. */
         bad = f.config;
         if (kind < 2U) {
-            /* baseline 只接受 1..10。 */
+            /* Baseline accepts only 1..10 frames. */
             bad.required_baseline_frames = kind == 0 ? 0 : 11;
         } else {
-            /* 帧预算只接受 1..600。 */
+            /* Frame budget accepts only 1..600 records. */
             bad.frame_limit = kind == 2U ? 0 : 601;
         }
         rejected(bad, old, new_image, OMNI_PIXEL_INVALID_ARGUMENT);
@@ -174,28 +174,28 @@ static void geometry_and_configuration(void) {
     bad.roi.width = 0;
     rejected(bad, old, new_image, OMNI_PIXEL_INVALID_GEOMETRY);
     for (unsigned int kind = 0; kind < 7; ++kind) {
-        /* 不可信布局不能通过巨大 byte_count 或 padding 假装实际可读。 */
+        /* An oversized byte_count or padding claim cannot make invalid source geometry readable. */
         OmniPixelImage broken = old;
         switch (kind) {
-            case 0: /* nil bytes 没有可读取的源。 */
+            case 0: /* Null bytes provide no readable source. */
                 broken.bytes = NULL;
                 break;
-            case 1: /* 最后活动行不足一个字节也失败。 */
+            case 1: /* Even one missing byte in the last active row must fail. */
                 broken.byte_count = 151;
                 break;
-            case 2: /* stride 不能短于完整活动行。 */
+            case 2: /* Stride cannot be shorter than one complete active row. */
                 broken.bytes_per_row = 31;
                 break;
-            case 3: /* 原始宽度乘四溢出在运算之前拒绝。 */
+            case 3: /* Reject width-times-four overflow before multiplication. */
                 broken.width = SIZE_MAX;
                 break;
-            case 4: /* 行跨度累计溢出不能生成指针。 */
+            case 4: /* Overflowing cumulative stride must not produce a pointer. */
                 broken.bytes_per_row = SIZE_MAX;
                 break;
-            case 5: /* 源高变化不能沿用参考几何。 */
+            case 5: /* A different source height cannot inherit reference geometry. */
                 broken.height = 3;
                 break;
-            default: /* 空图像不代表空白 OLD。 */
+            default: /* An empty image is not blank OLD evidence. */
                 broken.height = 0;
                 break;
         }
@@ -210,7 +210,7 @@ static void geometry_and_configuration(void) {
     destroy(&oracle);
 }
 
-/* mask 允许固定共同像素变化，但不能跨出 ROI 或遮住哪怕一个 OLD/NEW 差异字节。 */
+/* A mask allows fixed common pixels to vary, without leaving the ROI or hiding even one OLD/NEW difference. */
 static void fixed_mask(void) {
     cases += 1U;
     Fixture f = fixture();
@@ -233,7 +233,7 @@ static void fixed_mask(void) {
     rejected(f.config, image(f.old_bytes), image(f.new_bytes), OMNI_PIXEL_INVALID_GEOMETRY);
 }
 
-/* 三份真实像素不能借“单 crop 256 KiB”规避总预算。 */
+/* Three actual buffers cannot evade the combined budget by reporting a single crop's size. */
 static void total_pixel_budget(void) {
     cases += 1U;
     size_t bytes = 256U * 86U * 4U;
@@ -256,7 +256,7 @@ static void total_pixel_budget(void) {
     free(new_bytes);
 }
 
-/* UNKNOWN 打断 baseline；后来成功只证明已审计 witness，不证明之前没有 NEW。 */
+/* UNKNOWN interrupts baseline; later audit success establishes a witness without proving earlier absence of NEW. */
 static void unknown_and_positive_baseline(void) {
     cases += 1U;
     Fixture f = fixture();
@@ -286,7 +286,7 @@ static void unknown_and_positive_baseline(void) {
     destroy(&oracle);
 }
 
-/* 600 帧重放期间一直不完成审计，证明分类进度不依赖 OCR 工作完成或覆盖旧帧。 */
+/* Defer audit through a 600-frame replay; classification must progress without OCR completion or overwriting old frames. */
 static void delayed_audit_600_frames(bool overflow) {
     cases += 1U;
     Fixture f = fixture();
@@ -299,10 +299,10 @@ static void delayed_audit_600_frames(bool overflow) {
     uint8_t candidate_copy[32];
     memcpy(candidate_copy, candidate.bytes, sizeof(candidate_copy));
     for (uint32_t index = 3; index <= OMNI_PIXEL_MAX_FRAMES; ++index) {
-        /* 反复 NEW→OLD→NEW 及候选后 UNKNOWN，不能把候选移动到审计完成附近。 */
+        /* Repeated NEW/OLD transitions and later UNKNOWN cannot move the candidate nearer audit completion. */
         memcpy(f.current, index % 2U == 0 ? f.new_bytes : f.old_bytes, sizeof(f.current));
         if (index == 99) {
-            /* 候选之后的 UNKNOWN 不影响此前全 OLD 事实，但保留整条分类的不确定性。 */
+            /* Later UNKNOWN preserves the earlier all-OLD fact while keeping whole-sequence classification uncertainty. */
             f.current[1U * 40U + 2U * 4U] ^= 1U;
         }
         require(!observe(oracle, index, f.current).earliest_observed_candidate, "no later frame replaces candidate");
@@ -314,7 +314,7 @@ static void delayed_audit_600_frames(bool overflow) {
     require(!omni_pixel_oracle_record(oracle, 600, &last) && last.frame.index == 600, "out of range preserves output");
     pass_audit(oracle, binding);
     if (overflow) {
-        /* 即便候选已经审计通过，超预算下一帧也必须使最终 witness 失败。 */
+        /* Even an audited candidate cannot excuse a later frame beyond the declared budget. */
         OmniPixelRecord ignored = {0};
         require(omni_pixel_oracle_observe(oracle, frame(601), image(f.new_bytes), &ignored) == OMNI_PIXEL_FRAME_OVERFLOW,
                 "601st frame fails instead of overwriting");
@@ -329,35 +329,35 @@ static void delayed_audit_600_frames(bool overflow) {
     destroy(&oracle);
 }
 
-/* 所有时序错误都在写记录前失败，原始候选和记录不受污染。 */
+/* Sequence errors fail before record publication, preserving the original candidate and accepted records. */
 static void ordering_failures(void) {
     cases += 1U;
     for (unsigned int kind = 0; kind < 7; ++kind) {
-        /* 每个反例使用新 owner，避免首错掩盖另一个实际边界。 */
+        /* Use a fresh owner per case so an earlier failure cannot mask another boundary. */
         Fixture f = fixture();
         OmniPixelOracle *oracle = create(&f);
         (void)observe(oracle, 1, f.old_bytes);
         OmniPixelFrame bad = frame(2);
         switch (kind) {
-            case 0: /* 不同 run 的帧不能进入当前序列。 */
+            case 0: /* Another run's frame cannot enter this sequence. */
                 bad.run_id += 1U;
                 break;
-            case 1: /* 重复帧 index 不能被当作新帧。 */
+            case 1: /* A repeated index cannot count as a new frame. */
                 bad.index = 1;
                 break;
-            case 2: /* 缺少已传入序列的 index 必须显式失败。 */
+            case 2: /* A gap in the supplied sequence must explicitly fail. */
                 bad.index = 3;
                 break;
-            case 3: /* 重复 display tick 不是新呈现证据。 */
+            case 3: /* Repeated display ticks provide no new presentation evidence. */
                 bad.display_ticks = frame(1).display_ticks;
                 break;
-            case 4: /* 倒退到起点之前同样失败。 */
+            case 4: /* Moving before the origin must also fail. */
                 bad.display_ticks = 999;
                 break;
-            case 5: /* callback 时钟倒退不能被 OCR 时间掩盖。 */
+            case 5: /* OCR timing cannot conceal backward callback clocks. */
                 bad.callback_absolute_ticks = frame(1).callback_absolute_ticks;
                 break;
-            default: /* callback 早于其声明的 display 是不可信时钟输入。 */
+            default: /* Callback before its declared display time is inconsistent clock input. */
                 bad.callback_absolute_ticks = bad.display_ticks - 1U;
                 break;
         }
@@ -373,7 +373,7 @@ static void ordering_failures(void) {
     }
 }
 
-/* NEW 提前存在与只有 OLD/UNKNOWN 两种无候选情形都不能产生证据。 */
+/* Preexisting NEW and candidate-free OLD/UNKNOWN sequences cannot establish a witness. */
 static void preexisting_or_missing(void) {
     cases += 1U;
     Fixture f = fixture();
@@ -391,11 +391,11 @@ static void preexisting_or_missing(void) {
     destroy(&oracle);
 }
 
-/* 不同 run/index/ticks 的审计结果无法取得真实候选的权限。 */
+/* An audit with different run/index/ticks cannot acquire authority over the actual candidate. */
 static void mismatched_audits(void) {
     cases += 1U;
     for (unsigned int kind = 0; kind < 3; ++kind) {
-        /* 三个身份分量分别变化，避免只保护最容易检查的 run。 */
+        /* Change each identity coordinate independently, rather than protecting only the simplest run check. */
         Fixture f = fixture();
         OmniPixelOracle *oracle = create(&f);
         (void)observe(oracle, 1, f.old_bytes);
@@ -405,13 +405,13 @@ static void mismatched_audits(void) {
         require(omni_pixel_oracle_audit_begin(oracle, &binding, &candidate) == OMNI_PIXEL_OK, "begin identity test audit");
         OmniPixelAuditBinding bad = binding;
         if (kind == 0) {
-            /* 另一场测量的同一帧号也不能匹配。 */
+            /* The same frame index from another run still cannot match. */
             bad.run_id += 1U;
         } else if (kind == 1) {
-            /* 同 run 的较晚帧不能回填最早帧。 */
+            /* A later frame in this run cannot backfill the first candidate. */
             bad.frame_index += 1U;
         } else {
-            /* 只有 tick 改变也属于不同候选。 */
+            /* Different ticks alone still identify another candidate. */
             bad.display_ticks += 1U;
         }
         require(omni_pixel_oracle_audit_complete(oracle, bad, true, true) == OMNI_PIXEL_AUDIT_IDENTITY,
@@ -428,11 +428,11 @@ static void mismatched_audits(void) {
     }
 }
 
-/* 内容拒绝和真实释放声明失败都不可被第二次成功覆盖。 */
+/* Neither rejected content nor a false release declaration can be replaced by a second successful receipt. */
 static void rejected_and_duplicate_audits(void) {
     cases += 1U;
     for (unsigned int kind = 0; kind < 3; ++kind) {
-        /* 只在第三组先给成功，再注入非法重复回执。 */
+        /* Only the third case supplies initial success before sending an invalid duplicate receipt. */
         Fixture f = fixture();
         OmniPixelOracle *oracle = create(&f);
         (void)observe(oracle, 1, f.old_bytes);
@@ -453,7 +453,7 @@ static void rejected_and_duplicate_audits(void) {
     }
 }
 
-/* 提前 finish 或销毁必须保留仍在使用的候选，迟到任务只能结束借用。 */
+/* Early finish or destruction must retain a borrowed candidate; late work can only return the loan. */
 static void pending_finish_and_ownership(void) {
     cases += 1U;
     Fixture f = fixture();
@@ -482,11 +482,11 @@ static void pending_finish_and_ownership(void) {
     destroy(&oracle);
 }
 
-/* 小上限、布局变化和未审计归还都是明确失败，不会退化成忽略帧。 */
+/* Smaller caps, layout changes, and unaudited loan returns must fail explicitly rather than silently skipping frames. */
 static void additional_failure_edges(void) {
     cases += 1U;
     for (unsigned int kind = 0; kind < 4; ++kind) {
-        /* 每种状态错误从独立两帧候选开始。 */
+        /* Each lifecycle error starts with its own independent two-frame candidate. */
         Fixture f = fixture();
         f.config.frame_limit = 2;
         OmniPixelOracle *oracle = create(&f);
@@ -496,21 +496,21 @@ static void additional_failure_edges(void) {
         OmniPixelImage candidate = {0};
         require(omni_pixel_oracle_audit_begin(oracle, &binding, &candidate) == OMNI_PIXEL_OK, "begin additional edge audit");
         if (kind == 0) {
-            /* 实际工作方可以放弃结果，但归还本身不构成成功审计。 */
+            /* Work may abandon its result, but loan return alone cannot establish successful audit. */
             require(omni_pixel_oracle_audit_release(oracle, binding) == OMNI_PIXEL_AUDIT_STATE, "release without result is abandonment");
         } else if (kind == 1) {
-            /* 即便尚未写 footer，非法提前 free 也要保留失败。 */
+            /* Invalid early destruction preserves failure even before the footer exists. */
             require(omni_pixel_oracle_destroy(&oracle) == OMNI_PIXEL_AUDIT_PENDING, "early destruction rejected");
             finish_audit(oracle, binding, OMNI_PIXEL_AUDIT_PENDING);
         } else if (kind == 2) {
-            /* 第二个任务不取得另一个候选或清掉第一个借用。 */
+            /* A second task acquires neither another candidate nor authority to clear the first loan. */
             OmniPixelAuditBinding ignored_binding = {0};
             OmniPixelImage ignored_image = {0};
             require(omni_pixel_oracle_audit_begin(oracle, &ignored_binding, &ignored_image) == OMNI_PIXEL_AUDIT_STATE,
                     "only one audit job admitted");
             finish_audit(oracle, binding, OMNI_PIXEL_AUDIT_STATE);
         } else {
-            /* 声明较小帧上限同样禁止覆盖已完成的记录。 */
+            /* A smaller declared frame limit must also prevent accepted records from being overwritten. */
             pass_audit(oracle, binding);
             OmniPixelRecord ignored = {0};
             require(omni_pixel_oracle_observe(oracle, frame(3), image(f.old_bytes), &ignored) == OMNI_PIXEL_FRAME_OVERFLOW,
@@ -531,7 +531,7 @@ static void additional_failure_edges(void) {
     destroy(&oracle);
 }
 
-/* 临近 u64 上限的原始 ticks 不经浮点或窄整数，finish 之后的调用不改变已冻结记录。 */
+/* Ticks near u64 maximum remain exact, and calls after finish cannot change frozen records. */
 static void wide_ticks_and_sealed_footer(void) {
     cases += 1U;
     Fixture f = fixture();
@@ -564,36 +564,36 @@ static void wide_ticks_and_sealed_footer(void) {
     destroy(&oracle);
 }
 
-/* 活动状态调用错误不可静默消失；UNKNOWN-only 或未取得 audit 结果也不能通过。 */
+/* Active-call errors cannot disappear silently; UNKNOWN-only or unaudited observations cannot pass. */
 static void missing_audits_and_arguments(void) {
     cases += 1U;
     for (unsigned int kind = 0; kind < 5; ++kind) {
-        /* 不共享已失败状态，使每个失败来源独立可达。 */
+        /* Do not share failed state, keeping each failure source independently reachable. */
         Fixture f = fixture();
         OmniPixelOracle *oracle = create(&f);
         if (kind == 4) {
-            /* 纯 UNKNOWN 没有提供 OLD 或 NEW 的正向证据。 */
+            /* UNKNOWN alone provides positive evidence of neither OLD nor NEW. */
             f.current[1U * 40U + 2U * 4U] ^= 1U;
             require(observe(oracle, 1, f.current).state == OMNI_PIXEL_UNKNOWN, "unknown-only sample recorded");
         } else {
-            /* 其他分支从正常候选开始，不能把先前成功当作忽略后续调用错误的理由。 */
+            /* Other cases begin with a normal candidate; prior success cannot excuse a later invalid call. */
             (void)observe(oracle, 1, f.old_bytes);
             (void)observe(oracle, 2, f.new_bytes);
             OmniPixelAuditBinding binding = {0};
             OmniPixelImage candidate = {0};
             if (kind == 0) {
-                /* 缺少记录输出槽属于真实时序 API 错误。 */
+                /* Missing record output violates the active sequencing API contract. */
                 require(omni_pixel_oracle_observe(oracle, frame(3), image(f.new_bytes), NULL) == OMNI_PIXEL_INVALID_ARGUMENT,
                         "missing active record output fails closed");
             } else if (kind == 1) {
-                /* 缺少审计输出槽不能变成一次忽略的调用。 */
+                /* Missing audit output cannot become an ignored invocation. */
                 require(omni_pixel_oracle_audit_begin(oracle, NULL, &candidate) == OMNI_PIXEL_INVALID_ARGUMENT,
                         "missing audit binding output fails closed");
             } else if (kind == 2) {
-                /* 有候选而从未审计，finish 必须失败并释放没有借出的像素。 */
+                /* An unaudited candidate makes finish fail and release every pixel buffer with no outstanding loan. */
                 require(omni_pixel_oracle_owned_pixel_bytes(oracle) != 0, "unaudited candidate still owned before finish");
             } else {
-                /* 正常结束后重复归还仍是协议错误，不能伪造第二个成功。 */
+                /* Duplicate return after normal audit still violates protocol and cannot invent another success. */
                 require(omni_pixel_oracle_audit_begin(oracle, &binding, &candidate) == OMNI_PIXEL_OK,
                         "begin duplicate release edge");
                 pass_audit(oracle, binding);
@@ -611,14 +611,14 @@ static void missing_audits_and_arguments(void) {
     require(omni_pixel_oracle_destroy(&empty) == OMNI_PIXEL_OK, "empty owner slot cleanup idempotent");
 }
 
-/* 源行可以换成紧凑 stride；只复制 ROI 的活动像素，绝不把 padding 当成模板。 */
+/* Compact source stride remains valid; copy active ROI pixels without incorporating padding into templates. */
 static void different_valid_strides(void) {
     cases += 1U;
     Fixture f = fixture();
     OmniPixelOracle *oracle = create(&f);
     uint8_t compact[128];
     for (size_t row = 0; row < 4; ++row) {
-        /* 活动行从不同 padding 的参考源复制到独立紧凑内存。 */
+        /* Copy active rows from a padded reference into independently owned compact memory. */
         memcpy(compact + row * 32U, f.new_bytes + row * 40U, 32U);
     }
     OmniPixelImage packed = {compact, sizeof(compact), 8, 4, 32};
@@ -633,7 +633,7 @@ static void different_valid_strides(void) {
     OmniPixelImage candidate = {0};
     require(omni_pixel_oracle_audit_begin(oracle, &binding, &candidate) == OMNI_PIXEL_OK, "begin packed candidate audit");
     for (size_t row = 0; row < 2; ++row) {
-        /* 候选紧凑行必须完整等于该时刻源 ROI，不能只检查一个识别字节。 */
+        /* Every compact candidate row must equal the source ROI at capture, rather than checking one distinctive byte. */
         require(memcmp(candidate.bytes + row * 16U, compact + (row + 1U) * 32U + 8U, 16U) == 0,
                 "all candidate ROI rows are exact independent copies");
     }
@@ -644,7 +644,7 @@ static void different_valid_strides(void) {
     destroy(&oracle);
 }
 
-/* 只有纯逻辑组全部成功才输出固定标量摘要，不调用任何捕获或权限接口。 */
+/* Emit a scalar summary only after all pure cases succeed, without invoking capture or permission APIs. */
 int main(void) {
     exact_pixels();
     geometry_and_configuration();

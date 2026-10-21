@@ -159,6 +159,7 @@ mod acceptance_diagnostics {
     }
 
     impl Drop for NativeDeliveryScope {
+        /// Restore the enclosing real-delivery authorization without querying another input source or owner.
         fn drop(&mut self) {
             // Normal return and unwind restore the outer value; TLS destruction must not reinitialize diagnostics.
             let _ = NATIVE_DELIVERY_ACTIVE.try_with(|active| active.set(self.previous));
@@ -447,6 +448,7 @@ impl Registration {
 }
 
 impl Drop for Registration {
+    /// Disable dispatch, then release only this process's one active key, optional retired key and handler.
     fn drop(&mut self) {
         // Make callbacks inert first. Cleanup is finite and OS failures cannot justify a release claim.
         self.api.publish_active_id(None);
@@ -601,6 +603,7 @@ fn native_reference(status: i32, reference: *mut c_void) -> Result<*mut c_void, 
 struct RegistrationLease(Option<Registration>);
 
 impl Drop for RegistrationLease {
+    /// Return the extracted real owner outside all native calls, including unwind and TLS teardown paths.
     fn drop(&mut self) {
         // Restoration also runs during Rust unwinding; never panic if TLS is already destroying or
         // an unexpected nested borrow violates the lease invariant. Normal operations restore the owner.
@@ -649,6 +652,7 @@ fn with_registration<T>(
 pub(super) struct NativeShortcutPreferences;
 
 impl ShortcutPreferences for NativeShortcutPreferences {
+    /// Read the actual committed key on its AppKit thread without treating an absent owner as a default binding.
     fn current(&self) -> Result<Option<ShortcutView>, ShortcutPreferencesError> {
         // TLS alone cannot establish legal Carbon/AppKit access.
         let _mtm = MainThreadMarker::new().ok_or(ShortcutPreferencesError::StateUnavailable)?;
@@ -661,6 +665,7 @@ impl ShortcutPreferences for NativeShortcutPreferences {
         })
     }
 
+    /// Apply an explicit validated choice through the sole Carbon owner and real atomic settings store.
     fn update(&self, binding: &str) -> Result<ShortcutView, ShortcutPreferencesError> {
         // Parse and resolve storage before borrowing or acquiring any native ownership.
         let _mtm = MainThreadMarker::new().ok_or(ShortcutPreferencesError::StateUnavailable)?;

@@ -38,6 +38,7 @@ define_class!(
     unsafe impl NSObjectProtocol for ReadinessObserver {}
 
     impl ReadinessObserver {
+        /// Treat a matching native event as a reason to inspect readiness, never as readiness evidence itself.
         #[unsafe(method(launcherReadinessEvent:))]
         fn event(&self, notification: &NSNotification) {
             // These AppKit application/window/control notifications are delivered synchronously on their main thread.
@@ -48,6 +49,7 @@ define_class!(
             }
         }
 
+        /// Handle this registration's first-responder changes and preserve superclass handling for every other context.
         #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
         fn changed(
             &self,
@@ -121,6 +123,7 @@ impl FirstResponderObservation {
 }
 
 impl Drop for FirstResponderObservation {
+    /// Revoke the exact registration before releasing its observer, without keeping the measured panel alive.
     fn drop(&mut self) {
         if let Some(panel) = self.panel.load() {
             // Remove only this registration; if the weak identity is nil, do not guess a replacement observed object.
@@ -171,6 +174,7 @@ impl Notifications {
 }
 
 impl Drop for Notifications {
+    /// Remove all three registrations while the retained observer is still live; queued checks remain epoch-guarded.
     fn drop(&mut self) {
         // SAFETY: This observer owns these three named registrations; remove them before release without modifying others.
         unsafe { self.center.removeObserver(&self.observer) };

@@ -63,9 +63,11 @@ const MACOS_DOWN_ARROW_KEY_CODE: u16 = 125;
 const QUIT_ACTIVATION_CODE: &str = "quit";
 
 thread_local! {
+    /// The sole visible launcher graph, transferred to Closing before native preflight can reenter.
     static ACTIVE_SURFACE: RefCell<Option<NativeLauncherSurface>> = const { RefCell::new(None) };
     // Native close is a request: retain the graph until its deferred will-close finalizer.
     static CLOSING_SURFACE: RefCell<Option<NativeLauncherSurface>> = const { RefCell::new(None) };
+    /// Pure capability and handoff claims coordinate every adapter without retaining their native graphs.
     static FOREGROUND_STATE: RefCell<ForegroundSurfaceState> =
         RefCell::new(ForegroundSurfaceState::new());
 }
@@ -193,6 +195,7 @@ enum NativeLauncherActivationError {
 }
 
 impl std::fmt::Display for NativeLauncherActivationError {
+    /// Keep UI categories Chinese and preserve each execution boundary's bounded diagnostic cause.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             // Plugin failures retain their SDK category and bounded message.
@@ -214,6 +217,7 @@ impl std::fmt::Display for NativeLauncherActivationError {
 }
 
 impl std::error::Error for NativeLauncherActivationError {
+    /// Expose the actual typed platform cause while string boundary errors remain complete leaf failures.
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             // Platform launch failures preserve their typed underlying cause.
@@ -230,6 +234,7 @@ impl std::error::Error for NativeLauncherActivationError {
 impl ActivationSink for NativeActivationSink {
     type Error = NativeLauncherActivationError;
 
+    /// Dispatch one already-converted action through its owning native/SDK adapter after termination admission.
     fn activate(&self, action: LauncherAction) -> Result<(), Self::Error> {
         if termination::suppress_successors() {
             // Queued catalog actions cannot launch applications or acquire foreground owners during app quit.
@@ -277,6 +282,7 @@ enum NativeLauncherDispatchError {
 }
 
 impl std::fmt::Display for NativeLauncherDispatchError {
+    /// Preserve conversion-versus-execution ownership without copying another layer's error mapping.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             // Conversion errors mean no native action was attempted.

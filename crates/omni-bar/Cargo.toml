@@ -58,7 +58,7 @@ required-features = ["native-acceptance"]
 [dependencies]
 omni-launcher-query = { path = "../launcher-query" }
 # Each plugin comes from an independent Git repository; one immutable revision also fixes its owned Core.
-omni-md-plugin = { git = "https://github.com/nilo-ggyt/omni-md.git", rev = "64adaf0b751edfa46fddbdc6d441e3f7f2800d5e", version = "=0.1.0" }
+omni-md-plugin = { git = "https://github.com/nilo-ggyt/omni-md.git", rev = "5ba261979420b9a95fbaf30b3d0e46c1de0040bf", version = "=0.1.0" }
 omni-plugin-sdk.workspace = true
 serde_json = { version = "=1.0.151", optional = true }
 crc32fast = "=1.5.0"

@@ -4,9 +4,9 @@ use objc2::rc::Retained;
 use objc2::runtime::{ProtocolObject, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAccessibility, NSAlert, NSBackingStoreType, NSButton, NSColor, NSFont, NSPopUpButton,
-    NSScrollView, NSTextAlignment, NSTextField, NSUserInterfaceItemIdentification, NSView,
-    NSWindowStyleMask,
+    NSAccessibility, NSAlert, NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor,
+    NSFont, NSPopUpButton, NSScrollView, NSTextAlignment, NSTextField,
+    NSUserInterfaceItemIdentification, NSView, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
@@ -20,6 +20,9 @@ use crate::capabilities::{shortcut_preferences::ShortcutBinding, unit_conversion
 
 const WIDTH: f64 = 760.0;
 const HEIGHT: f64 = 500.0;
+// Preserve the former undecorated built-in window's usable resizing floor.
+const MIN_WIDTH: f64 = 680.0;
+const MIN_HEIGHT: f64 = 460.0;
 
 define_class!(
     /// A foreground-only fixed-row document view places newest clipboard previews at its top edge.
@@ -31,6 +34,7 @@ define_class!(
 
     impl ClipboardList {
         #[unsafe(method(isFlipped))]
+        /// Keep the fixed clipboard rows in the native scroll view's top-first visual order.
         fn is_flipped(&self) -> bool {
             // The newest preview begins at the top of a freshly displayed scroll document.
             true
@@ -106,19 +110,31 @@ pub(super) fn build(
         msg_send![
             super(BuiltInPanel::alloc(mtm).set_ivars(())),
             initWithContentRect: rect(0.0, 0.0, WIDTH, HEIGHT),
-            styleMask: NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
+            styleMask: NSWindowStyleMask::Borderless | NSWindowStyleMask::Resizable,
             backing: NSBackingStoreType::Buffered,
             defer: false
         ]
     };
     // SAFETY: the Rust session owns the allocated panel; AppKit must not independently release it on close.
     unsafe { panel.setReleasedWhenClosed(false) };
+    // Native decoration and traffic lights are absent, matching the original .decorations(false)
+    // contract. Resizing changes only content geometry; existing return/dismiss actions still own close.
+    panel.setContentMinSize(NSSize::new(MIN_WIDTH, MIN_HEIGHT));
     panel.setTitle(&NSString::from_str(title(kind)));
     panel.setDelegate(Some(ProtocolObject::from_ref(controller)));
     panel.setHidesOnDeactivate(false);
     panel.setFloatingPanel(true);
+    // The original built-in page marked its background as a deep drag region. Native background
+    // dragging preserves movement after title-bar removal while controls keep their normal mouse handling.
+    panel.setMovableByWindowBackground(true);
+    panel.setHasShadow(true);
     panel.setBackgroundColor(Some(&NSColor::windowBackgroundColor()));
     let content = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, WIDTH, HEIGHT));
+    // AppKit's autoresizing preserves the current layout without another controller or layout engine.
+    content.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
+    );
+    content.setAutoresizesSubviews(true);
     panel.setContentView(Some(&content));
     // Register the explicitly constructed root without claiming AppKit decoration/editor descendants.
     ledger.include("builtin.content", &content)?;
@@ -134,6 +150,16 @@ pub(super) fn build(
         rect(18.0, 452.0, 150.0, 30.0),
     )?;
     content.addSubview(&back);
+    // Keep the Chinese capability name visible in the existing header space after removing the native title bar.
+    let heading = label(
+        "builtin.title",
+        ledger,
+        title(kind),
+        mtm,
+        rect(186.0, 455.0, 550.0, 24.0),
+    )?;
+    heading.setFont(Some(&NSFont::boldSystemFontOfSize(17.0)));
+    content.addSubview(&heading);
     let output = label(
         "builtin.output",
         ledger,
@@ -143,9 +169,17 @@ pub(super) fn build(
     )?;
     output.setSelectable(true);
     output.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+    // Status stays below the clipboard action row; widening changes only its horizontal text capacity.
+    output.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewMaxYMargin,
+    );
     content.addSubview(&output);
     let input = NSTextField::textFieldWithString(&NSString::from_str(""), mtm);
     input.setFrame(rect(24.0, 391.0, 712.0, 34.0));
+    // Keep the native editing field below its top header while preserving both horizontal insets.
+    input.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewMinYMargin,
+    );
     input.setFont(Some(&NSFont::systemFontOfSize(17.0)));
     // SAFETY: the main-thread session retains this conforming editing delegate until detach;
     // no borrowed control or controller pointer can escape the foreground graph.
@@ -182,8 +216,7 @@ pub(super) fn build(
     from.setHidden(true);
     to.setHidden(true);
     shortcuts.setHidden(true);
-    content.addSubview(&from);
-    content.addSubview(&to);
+    // Unit controls attach to their one native row only for conversion; inactive controls remain hidden session owners.
     content.addSubview(&shortcuts);
     let mut actions = vec![back];
     let mut rows = Vec::new();
@@ -241,20 +274,44 @@ pub(super) fn build(
             }
             from.setHidden(false);
             to.setHidden(false);
-            content.addSubview(&*label(
+            // A single native row gives both columns the same resizing coordinates. Its symmetric
+            // flexible widths/margins keep the arrow's gap at the 680-point minimum as well as larger widths.
+            let units = NSView::initWithFrame(NSView::alloc(mtm), rect(24.0, 330.0, 626.0, 55.0));
+            units.setAutoresizingMask(
+                NSAutoresizingMaskOptions::ViewWidthSizable
+                    | NSAutoresizingMaskOptions::ViewMinYMargin,
+            );
+            ledger.include("units.choices", &units)?;
+            from.setFrame(rect(0.0, 0.0, 290.0, 30.0));
+            from.setAutoresizingMask(
+                NSAutoresizingMaskOptions::ViewWidthSizable
+                    | NSAutoresizingMaskOptions::ViewMaxXMargin,
+            );
+            to.setFrame(rect(336.0, 0.0, 290.0, 30.0));
+            to.setAutoresizingMask(
+                NSAutoresizingMaskOptions::ViewWidthSizable
+                    | NSAutoresizingMaskOptions::ViewMinXMargin,
+            );
+            units.addSubview(&from);
+            units.addSubview(&to);
+            let from_label = label(
                 "units.from-label",
                 ledger,
                 "从",
                 mtm,
-                rect(24.0, 365.0, 290.0, 20.0),
-            )?);
-            content.addSubview(&*label(
+                rect(0.0, 35.0, 290.0, 20.0),
+            )?;
+            from_label.setAutoresizingMask(from.autoresizingMask());
+            units.addSubview(&from_label);
+            let to_label = label(
                 "units.to-label",
                 ledger,
                 "到",
                 mtm,
-                rect(360.0, 365.0, 290.0, 20.0),
-            )?);
+                rect(336.0, 35.0, 290.0, 20.0),
+            )?;
+            to_label.setAutoresizingMask(to.autoresizingMask());
+            units.addSubview(&to_label);
             let definitions = unit_conversion::definitions();
             for definition in &definitions {
                 // Fifteen static choices cover exactly length, mass and temperature.
@@ -272,13 +329,20 @@ pub(super) fn build(
                     })
                     .unwrap_or(0) as isize,
             );
-            content.addSubview(&*label(
+            let arrow = label(
                 "units.arrow",
                 ledger,
                 "→",
                 mtm,
-                rect(324.0, 331.0, 30.0, 24.0),
-            )?);
+                rect(300.0, 1.0, 30.0, 24.0),
+            )?;
+            // The fixed-size arrow shares the two elastic horizontal margins instead of stretching its glyph.
+            arrow.setAutoresizingMask(
+                NSAutoresizingMaskOptions::ViewMinXMargin
+                    | NSAutoresizingMaskOptions::ViewMaxXMargin,
+            );
+            units.addSubview(&arrow);
+            content.addSubview(&units);
             let convert = button(
                 "units.convert",
                 ledger,
@@ -303,7 +367,7 @@ pub(super) fn build(
             content.addSubview(&copy);
             actions.push(copy);
         }
-        // The visible panel owns only bounded previews; full bodies remain in transient storage maps.
+        // The visible panel owns bounded previews only; full bodies exist solely in operation-scoped owned read buffers.
         BuiltInSurface::Clipboard => {
             // The panel reuses ordinary mouse-move delivery for row selection without per-row tracking resources.
             panel.setAcceptsMouseMovedEvents(true);
@@ -313,6 +377,11 @@ pub(super) fn build(
                 rect(24.0, 100.0, 712.0, 275.0),
             );
             scroll.setHasVerticalScroller(true);
+            // Preserve the search/status/action gaps while assigning all extra height and width to the viewport.
+            scroll.setAutoresizingMask(
+                NSAutoresizingMaskOptions::ViewWidthSizable
+                    | NSAutoresizingMaskOptions::ViewHeightSizable,
+            );
             // The project creates the scroll view itself; AppKit supplies its internal clip/scroller composition.
             ledger.include("clipboard.scroll", &scroll)?;
             // SAFETY: initialize the allocated NSView subclass through the exact superclass
@@ -321,6 +390,8 @@ pub(super) fn build(
                 msg_send![super(ClipboardList::alloc(mtm).set_ivars(())),
                     initWithFrame: rect(0.0, 0.0, 690.0, MAX_ENTRY_COUNT as f64 * 42.0)]
             };
+            // Only document width follows the clip view; twenty fixed-height rows keep the original scroll extent.
+            list.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
             // Register the project list explicitly instead of inferring ownership from the scroll hierarchy.
             ledger.include("clipboard.list", &list)?;
             for index in 0..MAX_ENTRY_COUNT {
@@ -335,6 +406,8 @@ pub(super) fn build(
                     rect(4.0, index as f64 * 42.0 + 3.0, 676.0, 36.0),
                 )?;
                 row.setTag(index as isize);
+                // Row hit targets follow the document width without changing vertical order, selection or restore behavior.
+                row.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
                 row.setAlignment(NSTextAlignment::Left);
                 row.setHidden(true);
                 list.addSubview(&row);
@@ -351,6 +424,11 @@ pub(super) fn build(
                 mtm,
                 rect(24.0, 63.0, 140.0, 30.0),
             )?;
+            // Clearing remains above the fixed status footer rather than following the search field during vertical resize.
+            clear.setAutoresizingMask(
+                NSAutoresizingMaskOptions::ViewMaxXMargin
+                    | NSAutoresizingMaskOptions::ViewMaxYMargin,
+            );
             content.addSubview(&clear);
             actions.push(clear);
             // Explicit refresh preserves the baseline action independently of capture ticks or query edits.
@@ -363,6 +441,10 @@ pub(super) fn build(
                 mtm,
                 rect(176.0, 63.0, 100.0, 30.0),
             )?;
+            refresh.setAutoresizingMask(
+                NSAutoresizingMaskOptions::ViewMaxXMargin
+                    | NSAutoresizingMaskOptions::ViewMaxYMargin,
+            );
             content.addSubview(&refresh);
             actions.push(refresh);
         }
@@ -447,7 +529,7 @@ fn title(kind: BuiltInSurface) -> &'static str {
 
 /// Construct a value rectangle without retaining any layout state.
 fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {
-    // AppKit owns coordinates by value; all callers use the fixed foreground panel's bounds.
+    // AppKit owns initial coordinates by value; the owning native view's mask handles later resizing.
     NSRect::new(NSPoint::new(x, y), NSSize::new(width, height))
 }
 
@@ -501,6 +583,10 @@ fn label(
 ) -> Result<Retained<NSTextField>, String> {
     let label = NSTextField::labelWithString(&NSString::from_str(text), mtm);
     label.setFrame(frame);
+    // Ordinary labels retain top spacing and both horizontal insets; specialized rows override this mask at construction.
+    label.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewMinYMargin,
+    );
     label.setFont(Some(&NSFont::systemFontOfSize(14.0)));
     // Configured cells and controls each retain text; failed registration cannot return an untracked control.
     ledger.include_control(role, &label)?;
@@ -528,6 +614,10 @@ fn button(
         )
     };
     button.setFrame(frame);
+    // Fixed-width actions stay at their existing top/left position; footer and scroll rows override their own anchors.
+    button.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewMaxXMargin | NSAutoresizingMaskOptions::ViewMinYMargin,
+    );
     // Observe every constructed action button and actual cell independently from its parent view.
     ledger.include_control(role, &button)?;
     Ok(button)
@@ -543,6 +633,10 @@ fn popup(
     frame: NSRect,
 ) -> Result<Retained<NSPopUpButton>, String> {
     let popup = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), frame, false);
+    // The settings selector follows its top inset; conversion replaces this mask with its symmetric native-row policy.
+    popup.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewMinYMargin,
+    );
     // SAFETY: the retained controller implements the declared action and remains alive until detach.
     unsafe {
         popup.setTarget(Some(controller));

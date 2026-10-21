@@ -9,6 +9,7 @@
 #include <string.h>
 
 @implementation OmniFrameRecognitionLifetime
+/* Synthesized weak properties observe per-job objects without retaining their text/image graph. */
 @end
 
 /* The process admits one independent crop; Vision receives that crop rather than the capture sample. */
@@ -302,6 +303,7 @@ OmniFrameRecognition OmniFrameRecognize(CVPixelBufferRef crop, NSString *expecte
       /* Invalid/unavailable recognition cannot be interpreted as an absent expected token. */
       return result;
     }
+    /* Keep recognition policy fixed so dictionaries, correction, or automatic language detection cannot repair nonce text. */
     VNRecognizeTextRequest *request = [VNRecognizeTextRequest new];
     request.revision = VNRecognizeTextRequestRevision3;
     request.recognitionLevel = VNRequestTextRecognitionLevelAccurate;

@@ -70,6 +70,7 @@ impl ClipboardMonitor {
 }
 
 impl Drop for ClipboardMonitor {
+    /// Cancel this foreground-owned timer before its session becomes idle; no background monitor survives close.
     fn drop(&mut self) {
         // Cancellation happens on the same main queue that owns the callback's native accesses.
         self.source.cancel();

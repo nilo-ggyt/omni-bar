@@ -1,4 +1,4 @@
-/* 纯 BGRA 模板与标量时序合同；不调用 SCK、Vision、时钟、文件或任何原生 UI。 */
+/* Pure BGRA-template and scalar-sequence contract, without SCK, Vision, clock, filesystem, or native UI calls. */
 #ifndef OMNI_FRAME_PIXEL_ORACLE_H
 #define OMNI_FRAME_PIXEL_ORACLE_H
 
@@ -11,7 +11,7 @@
 #define OMNI_PIXEL_MAX_HEIGHT 128U
 #define OMNI_PIXEL_MAX_OWNED_BYTES 262144U
 
-/* 调用期间借用有效、稳定的 BGRA bytes；byte_count 必须描述调用方实际可读的整个范围。 */
+/* Borrow valid, stable BGRA bytes for the call; byte_count must describe the caller's actually readable extent. */
 typedef struct {
     const uint8_t *bytes;
     size_t byte_count;
@@ -20,7 +20,7 @@ typedef struct {
     size_t bytes_per_row;
 } OmniPixelImage;
 
-/* ROI 坐标属于输入 image；mask 坐标属于该 ROI，全部采用整数像素且不作缩放或颜色修复。 */
+/* ROI coordinates address the source image; mask coordinates address that ROI, in integer pixels without rescaling. */
 typedef struct {
     size_t x;
     size_t y;
@@ -28,21 +28,21 @@ typedef struct {
     size_t height;
 } OmniPixelRect;
 
-/* mask 只能忽略 OLD/NEW 原字节本来就相同的固定矩形，不能遮住任何模板差异。
- * 同字节检查不证明区域里没有文字；接线方仍须核对完整字形/边界，候选还必须同帧审计。 */
+/* A fixed mask may ignore only pixels whose original OLD/NEW bytes agree, never a template difference.
+ * Equal bytes do not prove absence of text; the adapter must establish complete glyph bounds and audit the same candidate frame. */
 typedef struct {
     bool enabled;
     OmniPixelRect rect;
 } OmniPixelMask;
 
-/* UNKNOWN 只表示与两个完整模板都不同，不能用作 NEW 不存在的证据。 */
+/* UNKNOWN means neither complete template matches; it is not evidence that NEW is absent. */
 typedef enum {
     OMNI_PIXEL_UNKNOWN,
     OMNI_PIXEL_OLD,
     OMNI_PIXEL_NEW
 } OmniPixelState;
 
-/* 错误均为有限标签；第一个时序或审计失败永久保留，不以迟到成功覆盖。 */
+/* Errors are finite labels; the first sequencing/audit failure survives every later successful callback. */
 typedef enum {
     OMNI_PIXEL_OK,
     OMNI_PIXEL_INVALID_ARGUMENT,
@@ -62,7 +62,7 @@ typedef enum {
     OMNI_PIXEL_NO_WITNESS
 } OmniPixelStatus;
 
-/* run 与源几何在创建后不可变；时钟由外部声明，模块不把任意 tick 自动解释为 SCK 呈现。 */
+/* Run and source geometry are immutable after creation; caller-declared ticks do not independently prove SCK presentation. */
 typedef struct {
     uint64_t run_id;
     uint64_t start_ticks;
@@ -72,7 +72,7 @@ typedef struct {
     OmniPixelMask mask;
 } OmniPixelConfig;
 
-/* 连续 index 只证明传入本模块的序列，没有声称它是系统完整 display-frame 编号。 */
+/* Consecutive indices establish only the supplied sequence, not a complete system display-frame sequence. */
 typedef struct {
     uint64_t run_id;
     uint32_t index;
@@ -80,7 +80,7 @@ typedef struct {
     uint64_t callback_absolute_ticks;
 } OmniPixelFrame;
 
-/* 每个收到的有效帧只保留标量；pending audit 不阻止后续帧分类，也不移动首个候选。 */
+/* Retain scalars for each accepted frame; pending audit neither blocks later classification nor moves the first candidate. */
 typedef struct {
     OmniPixelFrame frame;
     OmniPixelState state;
@@ -88,15 +88,15 @@ typedef struct {
     bool earliest_observed_candidate;
 } OmniPixelRecord;
 
-/* 唯一候选的同帧身份；外部审计必须原样回传三项，不允许用较晚图像回填较早 ticks。 */
+/* Bind audit to the one candidate's exact run/index/ticks; a later image cannot certify an earlier timestamp. */
 typedef struct {
     uint64_t run_id;
     uint32_t frame_index;
     uint64_t display_ticks;
 } OmniPixelAuditBinding;
 
-/* footer 只证明一个已审计的较晚 NEW witness；不能授权输入因果、首次呈现或延迟通过。
- * timeline_complete_for_classification 仅指已传入帧都可明确分类，不证明 SCK 实际交付完整。 */
+/* A footer establishes an audited later NEW witness only, without proving input causality, first presentation, or latency.
+ * timeline_complete_for_classification concerns supplied frames only, never completeness of actual SCK delivery. */
 typedef struct {
     bool witness_valid;
     bool pre_candidate_frames_all_old;
@@ -118,54 +118,54 @@ typedef struct {
     size_t owned_scalar_bytes;
 } OmniPixelFooter;
 
-/* 单线程顺序 owner；调用方须串行化，模块不创建工作线程、全局缓存或异步回调。 */
+/* A serial, single-threaded owner; callers serialize access, and no worker, global cache, or asynchronous callback is created. */
 typedef struct OmniPixelOracle OmniPixelOracle;
 
-/* 复制两份 ROI 并预留一份候选，三份实际分配总量不得超过 256 KiB；失败不修改输入。 */
+/* Copy two ROIs and reserve one candidate, totaling at most 256 KiB of actual pixels; rejection never modifies inputs. */
 OmniPixelOracle *omni_pixel_oracle_create(OmniPixelConfig config,
                                         OmniPixelImage old_image,
                                         OmniPixelImage new_image,
                                         OmniPixelStatus *status);
 
-/* 仅分类，不推进时序；源尺寸必须与创建时相同，stride 可变化但不能缺失任何活动像素。 */
+/* Classify without advancing sequence; dimensions stay fixed, while stride may vary if all active pixels remain readable. */
 OmniPixelStatus omni_pixel_oracle_classify(const OmniPixelOracle *oracle,
                                          OmniPixelImage image,
                                          OmniPixelState *state);
 
-/* 错误不会计为成功记录；UNKNOWN 中断连续 OLD baseline，但不冒充 absence 或立即销毁 witness。 */
+/* Errors do not count as accepted records; UNKNOWN interrupts consecutive OLD baseline without proving absence or destroying a witness. */
 OmniPixelStatus omni_pixel_oracle_observe(OmniPixelOracle *oracle,
                                         OmniPixelFrame frame,
                                         OmniPixelImage image,
                                         OmniPixelRecord *record);
 
-/* 借出唯一候选的只读像素；直到 audit_release 前 owner 不得销毁，候选 bytes 永不复写。 */
+/* Lend the sole candidate's immutable pixels; the owner cannot be destroyed until audit_release returns that loan. */
 OmniPixelStatus omni_pixel_oracle_audit_begin(OmniPixelOracle *oracle,
                                             OmniPixelAuditBinding *binding,
                                             OmniPixelImage *candidate);
 
-/* 外部回执必须来自该候选；两个 bool 是调用方声明，本纯模块不验证真实 OCR 或 native release。
- * sealed 后直接返回 SEALED 且不记录结果；已有首错时只记录清理事实并返回首错，不恢复观测。 */
+/* External receipts must identify this candidate; caller-supplied booleans cannot independently prove OCR or native release.
+ * Sealed calls return SEALED without mutation; after prior failure, cleanup facts may update but cannot restore validity. */
 OmniPixelStatus omni_pixel_oracle_audit_complete(OmniPixelOracle *oracle,
                                                OmniPixelAuditBinding binding,
                                                bool expected_validated,
                                                bool frame_graph_released);
 
-/* 审计方结束所有像素借用后显式归还；失败后也可归还以清理，但永远不能恢复有效 witness。
- * 归还前不得仍有持此 bytes 的外部 image/handler；模块无法用 bool 独立检查该调用方义务。 */
+/* Return the loan only after all audit pixel borrows end; failure still allows cleanup but never restores witness validity.
+ * No external image/handler may retain these bytes afterward; this pure module cannot independently verify that caller obligation. */
 OmniPixelStatus omni_pixel_oracle_audit_release(OmniPixelOracle *oracle,
                                               OmniPixelAuditBinding binding);
 
-/* 第一次调用永久封闭采集并冻结 footer；未完成/未归还的 audit 产生失败，迟到回执不能改写它。 */
+/* First finish seals collection and freezes the footer; incomplete or outstanding audit fails permanently despite late receipts. */
 OmniPixelFooter omni_pixel_oracle_finish(OmniPixelOracle *oracle);
 
-/* 只复制有限标量，不返回内部记录借用；out-of-range 不改变输出。 */
+/* Copy bounded scalars without lending an internal record; out-of-range calls leave output unchanged. */
 bool omni_pixel_oracle_record(const OmniPixelOracle *oracle, uint32_t offset, OmniPixelRecord *record);
 
-/* 有效 owner 的实际分配计数；scalar 包括固定 600 条记录及 owner 元数据，不含任何框架内存。 */
+/* Count this owner's actual allocation; scalar storage includes 600 fixed records and metadata, excluding framework memory. */
 size_t omni_pixel_oracle_owned_pixel_bytes(const OmniPixelOracle *oracle);
 size_t omni_pixel_oracle_owned_scalar_bytes(const OmniPixelOracle *oracle);
 
-/* 未归还审计借用时拒绝 free 并保留指针；其余路径释放实际像素/标量 owner 并置空调用方槽。 */
+/* An outstanding audit loan refuses free and preserves the pointer; other paths free owned storage and clear the caller's slot. */
 OmniPixelStatus omni_pixel_oracle_destroy(OmniPixelOracle **oracle);
 
 #endif

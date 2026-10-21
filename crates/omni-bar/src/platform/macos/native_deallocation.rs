@@ -107,6 +107,7 @@ struct NativeDeallocationMarkerIvars {
 }
 
 impl Drop for NativeDeallocationMarkerIvars {
+    /// Release this observer's sole counter claim when the runtime destroys or explicitly removes its marker.
     fn drop(&mut self) {
         // The runtime removes this unique association at source deallocation or explicit observer cancellation.
         // Cancellation disables completion first; only an uncancelled final claim supplies actual release authority.
@@ -257,6 +258,7 @@ impl NativeDeallocationCohort {
 }
 
 impl Drop for NativeDeallocationCohort {
+    /// Balance an unfinished builder claim without claiming that surviving observed objects deallocated.
     fn drop(&mut self) {
         if !self.sealed {
             // Construction failure releases its builder claim; surviving markers still retain no native source owner.
@@ -512,6 +514,7 @@ pub(super) fn verify_native_deallocation_accounting(
     surviving.signals.queue_if_complete();
     surviving.signals.queue_if_complete();
     if !surviving.signals.relay_queued.load(Ordering::Acquire) {
+        // Even completed markers need their real queued relay; elapsed time grants no callback authority.
         return Err("completed native deallocation did not reserve its unique relay".into());
     }
     // The existing driver's later native event checks the real callback count. No extra loop,

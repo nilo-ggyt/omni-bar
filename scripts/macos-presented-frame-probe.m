@@ -259,7 +259,8 @@ static NSString *clockTicks(uint64_t ticks) {
   return [NSString stringWithFormat:@"%llu", (unsigned long long)ticks];
 }
 
-/** Read a public process-birth identity without enumerating another process's arguments/environment. */
+/** Read the SDK-declared libproc birth identity without enumerating another process's arguments/environment.
+ * libproc marks its interfaces private/subject to change; this declaration is not a public ABI stability promise. */
 static BOOL processIdentity(pid_t pid, struct proc_bsdinfo *identity) {
   int bytes = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, identity, sizeof(*identity));
   return bytes == sizeof(*identity) && identity->pbi_pid == (uint32_t)pid && identity->pbi_uid == getuid();
@@ -994,6 +995,7 @@ static PresentedFrameObserver *activeObserver;
         /* Serialize final release/output after native stop; the independent watchdog bounds stuck callbacks. */
         PresentedFrameObserver *owner = weakSelf;
         if (owner == nil) {
+          /* Missing finalization ownership cannot emit a successful stop or leave an indefinitely waiting process. */
           _Exit(EX_SOFTWARE);
         }
         owner.stream = nil;
@@ -1170,6 +1172,7 @@ int main(int argc, const char **argv) {
       return EX_UNAVAILABLE;
     }
     if (!options.usesPicker) {
+      /* Existing recording access and picker-session consent remain disjoint routes; neither repairs the other's failure. */
       if (!CGPreflightScreenCaptureAccess()) {
         /* Existing mode only preflights; it never requests permission or substitutes the picker route. */
         fprintf(stderr, "Existing screen-recording authorization is absent; this observer does not request access.\n");

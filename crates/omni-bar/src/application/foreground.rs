@@ -45,6 +45,7 @@ pub enum ResumeTarget {
 }
 
 impl From<ForegroundSurface> for ResumeTarget {
+    /// Retain only the static capability identity after the active native/resource graph ends.
     fn from(surface: ForegroundSurface) -> Self {
         // Preserve only the semantic identity after a foreground session is destroyed.
         match surface {
@@ -111,6 +112,7 @@ impl SurfaceTransition {
 }
 
 #[derive(Debug, Default)]
+/// One short borrow owns logical claims only; native resources and their release evidence remain in platform adapters.
 struct ForegroundSurfaceSnapshot {
     /// Logical ownership remains occupied while the corresponding destruction claim is pending.
     active: Option<ForegroundSurface>,
@@ -378,6 +380,7 @@ impl ForegroundSurfaceState {
 }
 
 impl From<ResumeTarget> for ForegroundSurface {
+    /// Name the intended owner without allocating, showing or reopening its resources.
     fn from(target: ResumeTarget) -> Self {
         // This conversion names an owner but allocates no resource graph.
         match target {
@@ -409,6 +412,7 @@ pub enum SurfaceStateError {
 }
 
 impl std::fmt::Display for SurfaceStateError {
+    /// Present one fixed Chinese lifecycle category without exposing pointers, paths or document content.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Keep product messages bounded and independent from pointers/document paths.
         let message = match self {

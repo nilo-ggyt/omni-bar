@@ -1,4 +1,4 @@
-"""离线反例只构造真实serializer形状和显式proposal fixture；不采集、不启动产品。"""
+"""Offline counterexamples use real-serializer-shaped records and explicit proposal fixtures, without capture or product launch."""
 
 import copy
 import hashlib
@@ -19,12 +19,12 @@ SPEC.loader.exec_module(JOIN)
 
 
 def encode_lines(rows):
-    """保持生产trace要求的最终换行；witness仍显式是提案fixture。"""
+    """Preserve the production trace's required final newline; witnesses remain explicitly proposed fixtures."""
     return b"".join(json.dumps(row, separators=(",", ":")).encode() + b"\n" for row in rows)
 
 
 def trace_fixture(offset=0, numer=1, denom=1):
-    """按Host record_value/encode真实字段手写五条独立fixture，不伪造Snapshot或实际输入。"""
+    """Build five independent records with the host serializer's fields, without claiming a native Snapshot or actual input."""
     before = {"generation": "9", "utf8_bytes": "1048576", "utf16_units": "1048576"}
     after = {**before, "generation": "10"}
     header = {"schema": "omni.native-source-input-trace", "schema_version": 1, "kind": "header",
@@ -37,7 +37,7 @@ def trace_fixture(offset=0, numer=1, denom=1):
     kinds = ("key_down_begin", "selector_begin", "canonical_accepted", "selector_end", "key_down_end")
     records = []
     for index, (kind, ticks) in enumerate(zip(kinds, (1000, 1010, 1050, 1100, 1200))):
-        # 一次替换单ASCII字符，初始/最终长度相同；默认标量值来自serializer的实际默认规则。
+        # Model replacement of one ASCII character at unchanged length, using the serializer's real scalar defaults.
         scoped = index in (1, 2, 3)
         record = {"kind": "record", "record_kind": kind, "serial": str(index + 1),
                   "mach_ticks": str(offset + ticks), "event_serial": "1",
@@ -56,7 +56,7 @@ def trace_fixture(offset=0, numer=1, denom=1):
 
 
 def witness_fixture(trial, trace, candidate_delta=1000, offset=0):
-    """未来collector尚未实现：所有模板/可见性/audit事实都是本测试显式构造的模型。"""
+    """The capture producer is unimplemented; template, visibility, and audit facts are explicit test models only."""
     geometry = {"display_id": 1, "display_points": ["0", "0", "1440", "900"],
                 "filter_points": ["0", "0", "1440", "900"],
                 "source_roi_points": ["100", "100", "128", "24"],
@@ -84,7 +84,7 @@ def witness_fixture(trial, trace, candidate_delta=1000, offset=0):
     frames = []
     for index, (ticks, state) in enumerate(((offset + 600, "old"), (offset + 800, "old"),
                                             (offset + 1500, "old"), (candidate_ticks, "new")), 1):
-        # 输入后仍OLD是正常渲染等待；不把这个时钟错当输入前baseline的时间。
+        # OLD after input models normal rendering delay; its timestamp cannot replace the pre-input baseline time.
         frames.append({"kind": "frame", "run_id": trial["run_id"], "index": index,
                        "display_ticks": str(ticks), "callback_absolute_ticks": str(ticks + 10),
                        "state": state, "baseline_ready": index >= 2, "earliest_observed_candidate": index == 4,
@@ -106,7 +106,7 @@ def witness_fixture(trial, trace, candidate_delta=1000, offset=0):
 
 
 class UpperBoundTests(unittest.TestCase):
-    """临时目录是本测试唯一文件权限；所有接受结果仍标记fixture且不证明实际capture。"""
+    """Own the temporary directory only; all accepted results stay labeled fixture without proving actual capture."""
 
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="omni-frame-join-pure-")
@@ -118,14 +118,14 @@ class UpperBoundTests(unittest.TestCase):
                          "thresholds": {"p95_ns": "16700000", "p99_ns": "33400000"}}
 
     def write(self, name, raw):
-        """写入只由测试创建的0600普通文件；工具本身只读。"""
+        """Write test-owned 0600 regular files; the inspected tool itself remains read-only."""
         path = self.root / name
         path.write_bytes(raw)
         path.chmod(0o600)
         return hashlib.sha256(raw).hexdigest()
 
     def add_trial(self, candidate_delta=1000, offset=0, numer=1, denom=1):
-        """每个试次有独立ID/run/file，避免用重复artifact凑样本数量。"""
+        """Assign independent trial IDs, runs, and files so repeated artifacts cannot inflate the sample count."""
         index = len(self.manifest["trials"]) + 1
         trace = trace_fixture(offset, numer, denom)
         trial = {"trial_id": f"trial-{index}", "run_id": str(index), "input_file": f"input-{index}.jsonl",
@@ -142,27 +142,28 @@ class UpperBoundTests(unittest.TestCase):
         return trial, trace, witness
 
     def update_trace(self, trial, trace, witness):
-        """反例重新绑定正确SHA，确保失败来自语义验证而非无关的hash不符。"""
+        """Rebind hashes after malformed-input edits so semantic validation, rather than an unrelated hash mismatch, rejects them."""
         trial["input_sha256"] = self.write(trial["input_file"], encode_lines(trace))
         witness[0]["input_trace_sha256"] = trial["input_sha256"]
         self.update_witness(trial, witness)
 
     def update_witness(self, trial, witness):
-        """更新fixture文件而不改变其其余声明。"""
+        """Update a fixture file while preserving its other declared identities."""
         trial["witness_sha256"] = self.write(trial["witness_file"], encode_lines(witness))
 
     def inspect(self):
-        """显式opt-in仅给proposal fixture，不隐式启用任何captured模式。"""
+        """Opt in to proposal fixtures only, without implicitly enabling any captured-evidence mode."""
         self.write("manifest.json", json.dumps(self.manifest).encode())
         return JOIN.inspect_manifest(self.root / "manifest.json", True)
 
     def assert_invalid_trial(self, expected_reason=None):
-        """全组失败不能计算好样本子集的分位或阈值通过。"""
+        """A failed set cannot compute quantiles or threshold success from only its favorable subset."""
         report = self.inspect()
         self.assertFalse(report["all_declared_trials_valid"])
         self.assertIsNone(report["quantiles"])
         self.assertIsNone(report["fixture_thresholds_pass"])
         if expected_reason:
+            # A targeted counterexample checks its own reason; unrelated rejection is not sufficient.
             self.assertEqual(report["trial_results"][0]["reason"], expected_reason)
         return report
 
@@ -196,7 +197,7 @@ class UpperBoundTests(unittest.TestCase):
         values = [JOIN.Fraction(number, 3) for number in range(1, 102)]
         self.assertEqual(JOIN.nearest_rank(values, 95), (JOIN.Fraction(96, 3), 96))
         self.assertEqual(JOIN.nearest_rank(values, 99), (JOIN.Fraction(100, 3), 100))
-        # 迟到帧扩大观测上界；不能用较小的commit值替换已声明handler端点。
+        # A later frame widens the bound; the declared handler endpoint cannot silently become the smaller commit endpoint.
         self.add_trial(candidate_delta=16_700_050)
         self.assertFalse(self.inspect()["fixture_thresholds_pass"])
         self.manifest["endpoint"] = "commit"
@@ -243,7 +244,7 @@ class UpperBoundTests(unittest.TestCase):
                 current_witness = copy.deepcopy(witness)
                 self.update_trace(trial, changed, current_witness)
                 self.assert_invalid_trial()
-        # generation只在canonical处变化；只改结尾来伪装commit不能通过。
+        # Generation changes at the canonical record only; changing the final summary cannot invent an accepted commit.
         changed = copy.deepcopy(trace)
         changed[3]["document"]["generation"] = "9"
         self.update_trace(trial, changed, copy.deepcopy(witness))
@@ -419,5 +420,5 @@ class UpperBoundTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    # 普通unittest discovery仅解析自有合成文件，不运行任何原生采集路径。
+    # Ordinary unittest discovery parses owned synthetic files only, without entering native capture paths.
     unittest.main()

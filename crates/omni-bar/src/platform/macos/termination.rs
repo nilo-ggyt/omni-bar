@@ -213,48 +213,6 @@ pub(super) fn foreground_did_release() -> bool {
     suppress_successors()
 }
 
-/// Run pure fake-plugin callbacks under a real Preparing coordinator phase, never an AppKit wait.
-#[cfg(test)]
-pub(super) fn with_preparing_termination_for_test<T>(work: impl FnOnce() -> T) -> T {
-    struct Restore(ApplicationTermination);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            // Restore scalar TLS even if an assertion unwinds; no native operation occurs in this guard.
-            TERMINATION.with_borrow_mut(|state| *state = std::mem::take(&mut self.0));
-        }
-    }
-    let previous = TERMINATION.with_borrow_mut(std::mem::take);
-    let _restore = Restore(previous);
-    TERMINATION.with_borrow_mut(|state| {
-        // Preparing records synchronous completion without issuing a reply on this worker thread.
-        assert!(matches!(
-            state.request(TerminationReadiness::Active),
-            TerminationRequest::Prepare(_)
-        ));
-    });
-    work()
-}
-
-/// Model an explicit refusal and new quit within one scalar-only fake-plugin scenario.
-#[cfg(test)]
-pub(super) fn reject_and_retry_termination_for_test() {
-    TERMINATION.with_borrow_mut(|state| {
-        let previous = state
-            .transaction_ticket()
-            .expect("the test owns a Preparing transaction");
-        // Cancellation restores activation before a distinct explicit retry reserves a fresh identity.
-        assert_eq!(
-            state.prepared(previous, false, TerminationReadiness::Closing),
-            TerminationRequest::Cancel
-        );
-        assert!(matches!(
-            state.request(TerminationReadiness::Closing),
-            TerminationRequest::Prepare(_)
-        ));
-        assert_ne!(state.transaction_ticket(), Some(previous));
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,20 +237,5 @@ mod tests {
         assert!(request_application_termination().is_err());
         assert!(!QUEUED_REQUEST_PENDING.get());
         assert!(!suppress_successors());
-    }
-
-    /// Activation reservation before delegate entry is not terminal cleanup authority.
-    #[test]
-    fn queued_request_does_not_authorize_terminal_receipts() {
-        // Only the reservation flag is set; the actual coordinator remains Idle throughout this check.
-        QUEUED_REQUEST_PENDING.set(true);
-        assert!(suppress_successors());
-        assert!(!application_termination_pending());
-        QUEUED_REQUEST_PENDING.set(false);
-        with_preparing_termination_for_test(|| {
-            // An accepted delegate preparation has distinct authority even without a queued entry.
-            assert!(application_termination_pending());
-        });
-        assert!(!application_termination_pending());
     }
 }

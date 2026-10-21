@@ -1,4 +1,4 @@
-/* stdin 控制的非 GUI 内存 fixture；只创建本进程映射，不查询其他进程。 */
+/* A stdin-controlled, non-GUI memory workload owns only its mappings and never queries other processes. */
 #include <errno.h>
 #include <inttypes.h>
 #include <mach/mach_time.h>
@@ -14,17 +14,17 @@
 #define LIFETIME_NS UINT64_C(120000000000)
 #define MAX_COMMANDS 16
 
-/* 已映射区域由唯一局部 owner 持有；munmap 后不再保留可访问指针。 */
+/* One local owner holds the mapping; successful munmap removes every accessible pointer from this record. */
 struct allocation { void *address; size_t bytes; };
 
-/* 所有正常/失败退出都执行同一个有界释放路径，不累积历次映射。 */
+/* Normal and failed exits share one bounded release path, without accumulating mappings from earlier stages. */
 static bool release_allocation(struct allocation *allocation) {
   if (!allocation->address) {
-    /* 未分配时 FREE 幂等，不伪造已释放映射的第二次 munmap。 */
+    /* FREE is idempotent when empty, without issuing munmap again for an already released mapping. */
     return true;
   }
   if (munmap(allocation->address, allocation->bytes)) {
-    /* 释放失败必须报告失败；不能丢失仍需清理的 owner。 */
+    /* Preserve the owner on release failure so the remaining mapping is not silently lost. */
     return false;
   }
   allocation->address = NULL;
@@ -32,96 +32,96 @@ static bool release_allocation(struct allocation *allocation) {
   return true;
 }
 
-/* mmap 的有限页逐页写入，避免只预留虚拟地址而没有 physical-footprint 负载。 */
+/* Touch every page of a bounded mapping, creating real footprint instead of reserving only virtual addresses. */
 static bool allocate_and_touch(struct allocation *allocation, size_t bytes) {
-  if (!release_allocation(allocation)) return false; /* 旧映射未释放就拒绝替换。 */
+  if (!release_allocation(allocation)) return false; /* Refuse replacement while the old mapping is still owned. */
   long raw_page_size = sysconf(_SC_PAGESIZE);
   if (raw_page_size <= 0 || (uint64_t)raw_page_size > bytes) {
-    /* 未知页大小不能被静默替换成猜测值。 */
+    /* An unknown page size cannot silently become a guessed stride. */
     return false;
   }
   void *address = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-  if (address == MAP_FAILED) return false; /* 系统分配失败不进入触页循环。 */
+  if (address == MAP_FAILED) return false; /* Allocation failure must not enter the page-touch loop. */
   allocation->address = address;
   allocation->bytes = bytes;
   volatile unsigned char *payload = address;
   for (size_t offset = 0; offset < bytes; offset += (size_t)raw_page_size) {
-    /* volatile 写入阻止编译器消除；固定非零值不代表任何用户内容。 */
+    /* Volatile writes prevent optimization; these fixed nonzero bytes contain no user content. */
     payload[offset] = 0xa5;
   }
   payload[bytes - 1] = 0x5a;
   return true;
 }
 
-/* 完整行 ack 是阶段转换的同步点，不用猜测 sleep 等待分配完成。 */
+/* A complete acknowledgement line synchronizes stages, without guessed sleeps for allocation completion. */
 static bool acknowledge(const char *stage, const struct allocation *allocation) {
   return printf("{\"stage\":\"%s\",\"mapped_bytes\":\"%zu\"}\n", stage, allocation->bytes) > 0 &&
          fflush(stdout) == 0;
 }
 
-/* 有界命令读取在等待输入时仍检查 continuous 截止时间，stdin 关闭也会退出。 */
+/* Bounded command reads recheck the continuous-clock deadline while waiting and also stop on stdin closure. */
 static int read_command(char *line, size_t capacity, uint64_t origin,
                          const mach_timebase_info_data_t *base) {
   size_t used = 0;
   for (;;) {
     uint64_t now = mach_continuous_time();
     if (now < origin || (__uint128_t)(now - origin) * base->numer / base->denom >= LIFETIME_NS) {
-      /* 到达独立 lifetime 上限时不能继续保留映射等待父进程。 */
+      /* The independent lifetime limit ends ownership rather than retaining mappings while waiting for the parent. */
       return -1;
     }
     struct pollfd input = {.fd = STDIN_FILENO, .events = POLLIN, .revents = 0};
     int ready = poll(&input, 1, 250);
     if (ready < 0) {
-      /* 信号只中断本次等待；其他错误终止控制会话。 */
+      /* A signal interrupts only this wait; other errors end the control session. */
       if (errno == EINTR) continue;
       return -1;
     }
-    if (!ready) continue; /* 最多 250ms 后重查 deadline，不进行后台业务工作。 */
-    if (input.revents & (POLLERR | POLLNVAL)) return -1; /* 损坏 stdin 不再接收命令。 */
+    if (!ready) continue; /* Recheck the deadline within 250 ms, without background workload. */
+    if (input.revents & (POLLERR | POLLNVAL)) return -1; /* A broken input source cannot accept commands. */
     unsigned char byte = 0;
     ssize_t count = read(STDIN_FILENO, &byte, 1);
-    if (count < 0 && errno == EINTR) continue; /* 保留已读取的有限行。 */
-    if (count != 1) return -1; /* EOF/其他错误均触发释放。 */
+    if (count < 0 && errno == EINTR) continue; /* Keep the bounded line prefix across interrupted reads. */
+    if (count != 1) return -1; /* EOF and other read errors both trigger release. */
     if (byte == '\n') {
-      /* 完成单行后才允许调用者执行一个已知阶段。 */
+      /* Only a complete line permits the caller to execute a known stage. */
       line[used] = 0;
       return 0;
     }
-    if (byte == 0 || used + 1 >= capacity) return -1; /* 超长/嵌入 NUL 不截断执行。 */
+    if (byte == 0 || used + 1 >= capacity) return -1; /* Never execute a truncated or embedded-NUL command. */
     line[used++] = (char)byte;
   }
 }
 
-/* 无 PID 参数、GUI、文件输出或系统设置路径；唯一控制权限来自父进程拥有的 stdin。 */
+/* No PID argument, GUI, output file, or setting is exposed; the parent's stdin pipe is the sole control channel. */
 int main(void) {
   mach_timebase_info_data_t base = {0};
   struct allocation allocation = {0};
   if (mach_timebase_info(&base) != KERN_SUCCESS || !base.numer || !base.denom) return 65;
   uint64_t origin = mach_continuous_time();
   int status = 65;
-  if (!acknowledge("ready", &allocation)) return 74; /* 父进程不可读时没有已分配资源。 */
+  if (!acknowledge("ready", &allocation)) return 74; /* No mapping exists if the parent cannot receive readiness. */
   for (unsigned index = 0; index < MAX_COMMANDS; ++index) {
-    /* 有限命令数和独立 deadline 同时限制控制程序生命周期。 */
+    /* Both command count and an independent deadline bound this control process's lifetime. */
     char command[16];
     if (read_command(command, sizeof(command), origin, &base)) break;
     if (!strcmp(command, "ALLOC32")) {
-      /* 32MiB 是明确触页负载，实际 footprint 增量由 OS 测量，不硬断言相等。 */
+      /* This touches 32 MiB; the OS measures actual footprint growth, which need not equal mapped bytes. */
       if (!allocate_and_touch(&allocation, 32 * MIB) || !acknowledge("allocated32", &allocation)) break;
     } else if (!strcmp(command, "ALLOC192")) {
-      /* 可选192MiB阶段明确越过150MB新上限，释放后仍须保留实际历史峰值。 */
+      /* Optional 192 MiB is 201326592 bytes, crossing 200 MB; release must not erase the observed lifetime peak. */
       if (!allocate_and_touch(&allocation, 192 * MIB) || !acknowledge("allocated192", &allocation)) break;
     } else if (!strcmp(command, "FREE")) {
-      /* ack 只在 munmap 成功后发布；lifetime peak 不会因此被重置。 */
+      /* Acknowledge only after munmap succeeds; release does not reset the lifetime peak. */
       if (!release_allocation(&allocation) || !acknowledge("freed", &allocation)) break;
     } else if (!strcmp(command, "EXIT")) {
-      /* 正常退出先释放映射，再确认阶段；父进程还必须 wait 获得实际退出码。 */
+      /* Normal exit releases before acknowledgement; the parent must still wait for the actual exit code. */
       status = release_allocation(&allocation) && acknowledge("exiting", &allocation) ? 0 : 74;
       break;
     } else {
-      /* 未知命令不扩展成任意大小分配或 shell 操作。 */
+      /* Unknown commands cannot expand into arbitrary allocations or shell operations. */
       break;
     }
   }
-  if (!release_allocation(&allocation)) status = 74; /* 任何提前失败也保留释放错误。 */
+  if (!release_allocation(&allocation)) status = 74; /* Early failure must also preserve a release error. */
   return status;
 }

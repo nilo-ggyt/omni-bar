@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""离线核对真实 trace v1 与显式提案 fixture；当前没有真实 pixel witness producer。
+"""Validate real trace v1 and explicitly proposed fixtures offline; no real pixel-witness producer exists.
 
-用法：本脚本 manifest.json --allow-proposal-fixtures。只有 fixture 模式可以计算；
-退出78表示合同/模拟计算成立但实际采集仍未验证，1表示模拟上界未过门槛，65表示证据无效。
---describe-contract 不读取文件。所有新 witness/manifest 字段均属 proposal v1，不能把它们
-冒充当前 SCK collector 的 schema1 输出。首版只接受单个未标记 ASCII keyDown/insert/accept/
-commit/keyDown-end 的五条真实 serializer 形状；IME、嵌套、多次编辑明确不支持。
+Usage: this script manifest.json --allow-proposal-fixtures. Only fixture calculations are supported.
+Exit 78 means the contract/calculation holds while real capture remains unverified; 1 rejects the
+fixture bound, and 65 rejects evidence. --describe-contract reads no files. New witness/manifest fields
+are proposal v1, never the current SCK collector's schema1 output. This initial profile accepts exactly
+five real-serializer-shaped records for one unmarked ASCII keyDown/insert/accept/commit/keyDown-end;
+IME, nested callbacks, and multiple edits are explicitly unsupported.
 """
 
 import argparse
@@ -38,78 +39,78 @@ INVALID, UNVERIFIED = 65, 78
 
 
 class InvalidEvidence(ValueError):
-    """只携带固定错误标签，不传播路径、输入内容或底层异常文本。"""
+    """Carry finite failure labels without propagating paths, input contents, or underlying exception text."""
 
 
 def require(condition, reason):
-    """每项前提独立否决，不修复、补值或丢弃不利记录。"""
+    """Reject each unmet prerequisite without repairing, filling, or dropping unfavorable records."""
     if not condition:
         raise InvalidEvidence(reason)
 
 
 def keys(value, names):
-    """字段精确匹配，未知版本/扩展需要显式合同更新。"""
+    """Match fields exactly; unfamiliar versions and extensions require an explicit contract update."""
     require(type(value) is dict and set(value) == set(names.split()), "unsupported_fields")
 
 
 def integer(value, lower=0, upper=U64):
-    """bool 不能冒充计数，所有输入整数均有明确范围。"""
+    """Bound each input integer and reject bool as a counter."""
     require(type(value) is int and lower <= value <= upper, "invalid_integer")
     return value
 
 
 def decimal(value, lower=0, upper=U64):
-    """宽时钟/身份只接受规范十进制字符串，避免浮点或科学计数修复。"""
+    """Parse wide clocks and identities from canonical decimal text without floating-point or exponent repair."""
     require(type(value) is str and len(value) <= 20 and
             re.fullmatch(r"0|[1-9][0-9]*", value) is not None, "invalid_decimal")
     return integer(int(value), lower, upper)
 
 
 def identifier(value):
-    """报告只保留调用方声明的有限 trial nonce，不接受路径或任意文本。"""
+    """Allow only a finite caller-declared trial nonce in reports, excluding paths and arbitrary text."""
     require(type(value) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value) is not None,
             "invalid_identifier")
     return value
 
 
 def digest(value):
-    """artifact/token 身份必须为完整小写 SHA256，不能用截断前缀关联。"""
+    """Require full lowercase SHA256 artifact/token identities instead of matching truncated prefixes."""
     require(type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None,
             "invalid_digest")
     return value
 
 
 def unique_object(pairs):
-    """拒绝重复 key，避免不同解析器取到不同身份或完成事实。"""
+    """Reject duplicate keys so different parsers cannot select different identities or completion facts."""
     value = {}
     for name, item in pairs:
-        # 不能让后来的同名字段覆盖前一个失败/版本声明。
+        # A later duplicate must not replace an earlier failure or schema-version declaration.
         require(name not in value, "duplicate_field")
         value[name] = item
     return value
 
 
 def decode(raw):
-    """严格 JSON 不接受浮点/NaN；真实 trace 已将宽值编码为字符串。"""
+    """Reject floating-point/NaN JSON; the real trace already encodes wide values as strings."""
     try:
         return json.loads(raw, object_pairs_hook=unique_object,
                           parse_float=lambda _: require(False, "floating_json"),
                           parse_constant=lambda _: require(False, "nonfinite_json"))
     except (UnicodeError, json.JSONDecodeError, RecursionError, ValueError) as error:
-        # 已识别固定标签原样保留，其余解析器异常不输出原始字节。
+        # Preserve recognized finite labels; other parser exceptions must not expose raw evidence bytes.
         if isinstance(error, InvalidEvidence):
             raise
         raise InvalidEvidence("invalid_json") from error
 
 
 def json_lines(raw, maximum_records):
-    """完整 footer 必须连同最后换行存在；行数和每行字节先受限。"""
+    """Require the footer's final newline and bound line count and per-line bytes before decoding."""
     require(raw.endswith(b"\n"), "incomplete_newline")
     lines = raw.splitlines(keepends=True)
     require(2 <= len(lines) <= maximum_records, "record_budget")
     result = []
     for line in lines:
-        # CRLF、空行和超长记录均不属于真实 newline-only serializer 合同。
+        # CRLF, empty lines, and oversized records fall outside the real newline-only serializer contract.
         require(len(line) <= MAX_LINE_BYTES + 1 and line.endswith(b"\n") and
                 not line.endswith(b"\r\n") and line.strip(), "invalid_line")
         result.append(decode(line))
@@ -117,13 +118,13 @@ def json_lines(raw, maximum_records):
 
 
 def document(value):
-    """只读取真实 serializer 的三个 canonical 计数，不虚构文档内容证明。"""
+    """Read the real serializer's three canonical counters without claiming proof of document contents."""
     keys(value, "generation utf8_bytes utf16_units")
     return tuple(decimal(value[field]) for field in ("generation", "utf8_bytes", "utf16_units"))
 
 
 def validate_trace(raw, expected_initial):
-    """核对真实 schema v1，再严格限制为一条同步、无 marked 的 ASCII 提交。"""
+    """Validate the real v1 schema, then limit evidence to one synchronous unmarked ASCII commit."""
     rows = json_lines(raw, 258)
     header, footer, records = rows[0], rows[-1], rows[1:-1]
     keys(header, "schema schema_version kind record_count record_capacity completion_contract clock_domain "
@@ -155,7 +156,7 @@ def validate_trace(raw, expected_initial):
     require(len(records) == len(kinds), "unsupported_input_sequence")
     previous = armed
     for index, (record, kind) in enumerate(zip(records, kinds)):
-        # 精确五条 profile 不把异步/嵌套/额外编辑重新指向最后一个事件。
+        # The exact five-record profile cannot reattribute asynchronous, nested, or additional edits to the last event.
         keys(record, "kind record_kind serial mach_ticks event_serial selector_serial composition_serial selector "
              "nsevent_timestamp_bits document removed_utf16_units inserted_utf16_units native_marked outcome "
              "rejection accepted_count rejected_count")
@@ -180,11 +181,12 @@ def validate_trace(raw, expected_initial):
         require((removed in (0, 1) and inserted == 1) if index == 2 else (removed == inserted == 0),
                 "unsupported_ascii_edit")
         if index == 0:
-            # 原始 NSEvent 秒只验证有限/非负，不换算为 Mach 时间。
+            # Raw NSEvent seconds must be finite and nonnegative; do not convert them into a Mach timestamp.
             bits = decimal(record["nsevent_timestamp_bits"])
             timestamp = struct.unpack(">d", struct.pack(">Q", bits))[0]
             require(math.isfinite(timestamp) and timestamp >= 0, "invalid_nsevent_bits")
         else:
+            # Only key-down entry carries the original NSEvent clock; later records cannot invent another one.
             require(record["nsevent_timestamp_bits"] is None, "invented_event_timestamp")
         require(document(record["document"]) == (initial if index < 2 else document(records[2]["document"])),
                 "document_changed_outside_commit")
@@ -199,7 +201,7 @@ def validate_trace(raw, expected_initial):
 
 
 def target_identity(value):
-    """trace 没有原生进程身份；这里只核对提案 manifest 与 witness 的明确外部绑定。"""
+    """Check the proposal's external manifest/witness binding; the real trace contains no native process identity."""
     keys(value, "pid uid birth_sec birth_usec boot_epoch_id bundle_id")
     integer(value["pid"], 2, (1 << 31) - 1)
     integer(value["uid"], 1, U32)
@@ -213,7 +215,7 @@ def target_identity(value):
 
 
 def point(value):
-    """几何采用有限规范十进制字符串，分数运算不猜像素取整。"""
+    """Parse bounded canonical decimal geometry exactly, without guessing pixel rounding."""
     require(type(value) is str and len(value) <= 16 and
             re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.[0-9]{1,6})?", value) is not None,
             "invalid_geometry_decimal")
@@ -223,7 +225,7 @@ def point(value):
 
 
 def rectangle(value):
-    """完整四元矩形不能裁切成另外的有效 ROI。"""
+    """Require all four rectangle components; cropping cannot silently turn them into a different valid ROI."""
     require(type(value) is list and len(value) == 4, "invalid_rectangle")
     result = tuple(point(component) for component in value)
     require(result[2] > 0 and result[3] > 0, "empty_rectangle")
@@ -231,7 +233,7 @@ def rectangle(value):
 
 
 def geometry(value):
-    """复核当前 primary-display/native-resolution 合同及首版五份像素峰值。"""
+    """Check the primary-display/native-resolution contract and the initial five-buffer pixel budget."""
     keys(value, "display_id display_points filter_points source_roi_points content_points pixel_scale "
          "content_scale width height mask_enabled")
     integer(value["display_id"], 1, U32)
@@ -253,7 +255,7 @@ def geometry(value):
 
 
 def validate_witness(raw, trial, trace):
-    """只接受明确 fixture 提案；现有真实 collector schema1 与任何 captured 类别都拒绝。"""
+    """Accept only explicit proposal fixtures, rejecting real collector schema1 and all captured-evidence claims."""
     rows = json_lines(raw, 602)
     header, footer, frames = rows[0], rows[-1], rows[1:-1]
     keys(header, "schema schema_version kind evidence_mode producer_implemented actual_capture trial_id run_id "
@@ -296,7 +298,7 @@ def validate_witness(raw, trial, trace):
     baseline_count, baseline_ready, baseline_ticks, candidate = 0, False, None, None
     previous_display = previous_callback = start
     for index, frame in enumerate(frames, 1):
-        # 每一帧保留原时序/几何/身份；UNKNOWN不能用作absence，也不被静默略去。
+        # Preserve each frame's timing, geometry, and identity; UNKNOWN is neither absence evidence nor a skippable frame.
         keys(frame, "kind run_id index display_ticks callback_absolute_ticks state baseline_ready "
              "earliest_observed_candidate geometry target unoccluded sample_status")
         require(frame["kind"] == "frame" and frame["run_id"] == trial["run_id"] and
@@ -313,16 +315,16 @@ def validate_witness(raw, trial, trace):
         previous_display, previous_callback = displayed, callback
         require(frame["state"] in ("old", "new"), "unknown_pixel_state")
         if not baseline_ready:
-            # NEW在正向baseline之前是预先存在，不能等以后OLD恢复再算。
+            # NEW before an established OLD baseline is preexisting; a later OLD frame cannot repair that trial.
             require(frame["state"] == "old", "preexisting_new")
             baseline_count += 1
             baseline_ready = baseline_count >= baseline_needed
             if baseline_ready:
-                # 只锁定首次建立baseline的时钟；输入后的正常OLD等待帧不得覆盖它。
+                # Fix the first established baseline time; normal post-input OLD waiting frames cannot replace it.
                 baseline_ticks = displayed
         is_candidate = baseline_ready and frame["state"] == "new" and candidate is None
         if is_candidate:
-            # 第一候选时钟不能来自输入前/提交前；拒绝后不允许以较晚NEW修补。
+            # The first candidate must follow input and commit; rejection cannot be repaired using a later NEW frame.
             require(baseline_ticks is not None and baseline_ticks < trace["handler"] and
                     displayed > trace["commit"], "preexisting_or_precommit_new")
             candidate = {"run_id": trial["run_id"], "frame_index": index,
@@ -340,7 +342,7 @@ def validate_witness(raw, trial, trace):
     require(footer["kind"] == "complete" and footer["run_id"] == trial["run_id"] and
             integer(footer["recorded_frames"], 1, 600) == len(frames), "witness_completion_mismatch")
     for name in ("earliest_observed", "audit_binding"):
-        # run/index/display ticks三项完整匹配同一个首候选，不能用晚帧审计回填早时间。
+        # Run, index, and display ticks must all identify the first candidate; later-frame audits cannot backdate it.
         keys(footer[name], "run_id frame_index display_ticks")
         require(footer[name] == candidate, "audit_identity_mismatch")
     true_fields = ("witness_valid", "baseline_ready", "candidate_present", "audit_complete", "audit_passed",
@@ -365,7 +367,7 @@ def validate_witness(raw, trial, trace):
 
 
 def upper_bound(delta, numer, denom):
-    """整数有理值与ceil共同输出；绝不floor后比较阈值。"""
+    """Return exact rational nanoseconds and their ceiling; never floor a bound before comparing thresholds."""
     require(0 <= delta <= U64, "negative_or_overflowed_delta")
     exact = Fraction(delta * numer, denom)
     return exact, {"numerator": str(exact.numerator), "denominator": str(exact.denominator),
@@ -373,22 +375,23 @@ def upper_bound(delta, numer, denom):
 
 
 def nearest_rank(values, percent):
-    """同一完整集合按精确分数排序，不插值、不删慢样本。"""
+    """Sort the same complete sample set by exact fractions, without interpolation or removal of slow trials."""
     require(bool(values) and percent in (95, 99), "invalid_quantile")
     rank = (len(values) * percent + 99) // 100
     return sorted(values)[rank - 1], rank
 
 
 class ArtifactReader:
-    """目录fd固定只读权限；文件有限读取并校验读取期间身份不变。"""
+    """Use a read-only directory descriptor to bound reads and require stable file identity throughout them."""
 
     def __init__(self, directory_fd):
+        # The caller owns this fd; the reader tracks only cumulative bytes and already-consumed file identities.
         self.directory_fd = directory_fd
         self.consumed = 0
         self.identities = set()
 
     def read(self, name, maximum):
-        """只接受同一私有目录的普通文件，拒绝路径穿越、symlink、FIFO和别名复用。"""
+        """Read regular files in one private directory, rejecting traversal, symlinks, FIFOs, and identity reuse."""
         require(type(name) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}", name) is not None and
                 ".." not in name, "invalid_artifact_name")
         try:
@@ -410,12 +413,12 @@ class ArtifactReader:
                 self.identities.add(identity)
                 return raw, hashlib.sha256(raw).hexdigest()
         except OSError as error:
-            # 文件系统细节留在原始私有artifact中，不把路径/任意错误文本复制到stdout。
+            # Filesystem details stay in the private artifact context, without copying paths or arbitrary errors to stdout.
             raise InvalidEvidence("artifact_io_failure") from error
 
 
 def validate_manifest(value):
-    """先核对完整预声明trial集合，缺失/重复不得在统计时忽略。"""
+    """Check the complete predeclared trial set first; missing or duplicate trials cannot disappear from statistics."""
     keys(value, "schema schema_version evidence_mode profile endpoint planned_trial_count trial_ids trials thresholds")
     require(value["schema"] == MANIFEST_SCHEMA and type(value["schema_version"]) is int and
             value["schema_version"] == 1 and value["evidence_mode"] == "fixture_only" and
@@ -428,7 +431,7 @@ def validate_manifest(value):
     require(len(set(ids)) == count, "duplicate_trial")
     names, runs = set(), set()
     for index, trial in enumerate(value["trials"]):
-        # 文件和run也须独立；同一个观测不能换trial标签重复计权。
+        # Files and runs must also be independent; relabeling a single observation cannot give it repeated statistical weight.
         keys(trial, "trial_id run_id input_file input_sha256 witness_file witness_sha256 target initial_document "
              "old_token_id new_token_id")
         require(trial["trial_id"] == ids[index], "trial_order_mismatch")
@@ -447,7 +450,7 @@ def validate_manifest(value):
 
 
 def inspect_manifest(path, allow_proposal_fixtures=False):
-    """无进程/屏幕调用；完整集合任一失败都保留结果且不产生分位通过。"""
+    """Inspect files only; retain failed trials and withhold passing quantiles when any declared trial is invalid."""
     require(allow_proposal_fixtures is True, "proposal_fixture_requires_opt_in")
     directory_fd = None
     try:
@@ -459,7 +462,7 @@ def inspect_manifest(path, allow_proposal_fixtures=False):
         manifest = validate_manifest(decode(raw))
         results, bounds = [], []
         for trial in manifest["trials"]:
-            # 不在首个坏trial处统计剩余好样本；每个声明ID都有valid/invalid状态。
+            # Every declared ID gets a valid/invalid result; successful trials cannot hide the first failing trial.
             try:
                 trace_raw, trace_sha = reader.read(trial["input_file"], MAX_TRACE_BYTES)
                 require(trace_sha == trial["input_sha256"], "input_digest_mismatch")
@@ -474,7 +477,7 @@ def inspect_manifest(path, allow_proposal_fixtures=False):
                                 "candidate_frame_index": frame_index, "handler_upper_bound_ns": handler_json,
                                 "commit_upper_bound_ns": commit_json})
             except InvalidEvidence as error:
-                # 失败trial保留，下面整组quantiles=null；不能只聚合bounds中的成功前缀。
+                # Preserve failure and leave all quantiles null; never aggregate only the successful bounds prefix.
                 results.append({"trial_id": trial["trial_id"], "valid_fixture": False, "reason": str(error)})
         valid = len(bounds) == manifest["planned_trial_count"]
         report = {"schema": REPORT_SCHEMA, "schema_version": 1, "fixture_only": True,
@@ -486,7 +489,7 @@ def inspect_manifest(path, allow_proposal_fixtures=False):
                   "trial_results": results, "quantiles": None, "fixture_thresholds_pass": None,
                   "manifest_sha256": manifest_sha, "source_bytes": reader.consumed}
         if valid:
-            # 只有全部声明试次成立才计算经验分位；不是未来总体/真实capture或光子结论。
+            # Empirical quantiles require all declared trials; they establish neither future populations nor real capture/scanout.
             quantiles = {}
             for percent, threshold in ((95, 16700000), (99, 33400000)):
                 exact, rank = nearest_rank(bounds, percent)
@@ -500,20 +503,20 @@ def inspect_manifest(path, allow_proposal_fixtures=False):
     except OSError as error:
         raise InvalidEvidence("artifact_io_failure") from error
     finally:
-        # 无论验证/解析在哪一步失败，只结束本脚本打开的目录fd。
+        # Close only this function's acquired directory descriptor, regardless of parsing or validation failure.
         if directory_fd is not None:
             os.close(directory_fd)
 
 
 def main():
-    """单个JSON报告，不写任何产品/采集文件；合成通过也只退出UNVERIFIED。"""
+    """Print one JSON report without writing product/capture files; passing fixtures still exit UNVERIFIED."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("manifest", nargs="?")
     parser.add_argument("--allow-proposal-fixtures", action="store_true")
     parser.add_argument("--describe-contract", action="store_true")
     args = parser.parse_args()
     if args.describe_contract:
-        # 合同查询只列版本/限制，不读取fixture、进程或权限状态。
+        # Contract description reports versions and limits without reading fixtures, processes, or permission state.
         require(args.manifest is None and not args.allow_proposal_fixtures, "conflicting_cli_mode")
         print(json.dumps({"manifest_schema": MANIFEST_SCHEMA, "witness_schema": WITNESS_SCHEMA,
                           "schema_version": 1, "real_trace_schema": TRACE_SCHEMA, "profile": PROFILE,
@@ -525,8 +528,9 @@ def main():
     report = inspect_manifest(args.manifest, args.allow_proposal_fixtures)
     print(json.dumps(report, separators=(",", ":"), sort_keys=True))
     if not report["all_declared_trials_valid"]:
+        # Incomplete evidence outranks any favorable bounds computed from individual valid trials.
         return INVALID
-    # 数学fixture的阈值失败仍不等于产品慢；成功也不表示真实性能已通过。
+    # Fixture threshold failure does not prove a slow product; success does not prove real performance acceptance.
     return UNVERIFIED if report["fixture_thresholds_pass"] else 1
 
 
@@ -539,5 +543,5 @@ if __name__ == "__main__":
                           "capture_completeness_verified": False, "physical_scanout_verified": False}))
         sys.exit(INVALID)
     except (OSError, BrokenPipeError):
-        # 输出断管本身是失败；不再尝试把错误写回已损坏的管道。
+        # A broken output pipe is failure; do not attempt another error write through the same damaged pipe.
         sys.exit(INVALID)

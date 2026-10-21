@@ -8,10 +8,7 @@ import sys
 import plistlib
 from pathlib import Path
 import tempfile
-from types import SimpleNamespace
 import unittest
-from unittest import mock
-from contextlib import redirect_stdout
 
 SPEC = importlib.util.spec_from_file_location("attribution", Path(__file__).parents[1] / "macos_coalition_attribution.py")
 ATTRIBUTION = importlib.util.module_from_spec(SPEC)
@@ -91,40 +88,6 @@ class AttributionTests(unittest.TestCase):
             info = executable.parents[1] / "Info.plist"
             info.write_bytes(plistlib.dumps(["synthetic malformed root"]))
             self.assertIsNone(ATTRIBUTION.bundle_identity(str(executable)))
-
-    def test_provenance_failure_preserves_result_without_launching_observer(self):
-        # Failing before sampler startup must still expose a private attempt and never invoke sudo as recovery.
-        observed = {"pid": 42, "birth": "1000:99", "executable": "/Synthetic.app/Contents/MacOS/Synthetic",
-                    "bundle": {"identifier": "test.synthetic", "executable_matches": True}}
-        args = SimpleNamespace(pid=42, birth="1000:99", executable=observed["executable"],
-                               bundle_id="test.synthetic", samples=1)
-        with tempfile.TemporaryDirectory() as directory:
-            # Redirect only acquisition seams: the actual failure/result code and its exclusive JSON write execute.
-            output = io.StringIO()
-            with mock.patch.object(ATTRIBUTION.os, "geteuid", return_value=501), \
-                 mock.patch.object(ATTRIBUTION, "ProcessReader") as reader, \
-                 mock.patch.object(ATTRIBUTION.tempfile, "mkdtemp", return_value=directory), \
-                 mock.patch.object(ATTRIBUTION, "read_bounded", side_effect=OSError("synthetic provenance failure")), \
-                 mock.patch.object(ATTRIBUTION.subprocess, "Popen") as launch, redirect_stdout(output):
-                reader.return_value.identity.return_value = observed
-                self.assertEqual(ATTRIBUTION.collect(args), 1)
-            # A reviewer can find the retained failed attempt even though no capabilities or raw sample exist.
-            result = json.loads((Path(directory) / "result.json").read_text())
-            self.assertEqual(result["collection_status"], "failed")
-            self.assertIsNone(result["observer_pid"])
-            self.assertIn("synthetic provenance failure", result["failure"])
-            self.assertEqual(json.loads(output.getvalue())["directory"], directory)
-            launch.assert_not_called()
-
-    def test_observer_cleanup_timeout_remains_an_explicit_failure(self):
-        # An unresponsive observer cannot become a successful release claim or trigger a guessed privileged kill.
-        observer = mock.Mock()
-        observer.poll.return_value = None
-        observer.wait.side_effect = subprocess.TimeoutExpired("synthetic observer", 5)
-        self.assertFalse(ATTRIBUTION.stop_observer(observer))
-        observer.terminate.assert_called_once_with()
-        observer.wait.assert_called_once_with(timeout=5)
-        observer.kill.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -92,27 +92,30 @@ pub(super) fn install_input_trace_controls(mtm: MainThreadMarker) -> Result<(), 
 
 /// Bridge the public oneway selector omitted by the pinned generated objc2 bindings.
 fn release_named_pasteboard(pasteboard: &NSPasteboard) {
-    // 只接本夹具拥有的项目专用板；先同步清除合成载荷，再归还系统名称。
-    // releaseGlobally是oneway，不能把消息已发送误报为服务器销毁对象的观察收据。
+    // Accept only the project namespace owned by this fixture. Clear its synthetic payload
+    // synchronously before returning the name; the oneway release is not proof of server destruction.
     pasteboard.clearContents();
     // SAFETY: NSPasteboard.h declares this public zero-argument oneway void method. The caller
     // holds a live named pasteboard and executes on the main thread; no Rust ownership is transferred.
     unsafe { objc2::msg_send![pasteboard, releaseGlobally] }
 }
 
-/// 名称只由仍存活的独占目录身份确定；父进程能在子进程被kill且reap后恢复同一板名。
-/// 不用路径字面规避/private别名，也不猜系统uniqueName或读取任何其他板的内容。
+/// Derive a recoverable name from the still-live exclusive directory's filesystem identity.
+/// The parent can recover this exact name after reaping a killed child, without guessing a system
+/// uniqueName, depending on /private path aliases, or reading another pasteboard's contents.
 fn fixture_pasteboard_name(root: &Path) -> Result<String, String> {
     let metadata = root
         .symlink_metadata()
         .map_err(|_| "合成剪贴板的目录身份不可读".to_owned())?;
-    // SAFETY: geteuid无参数且只返回当前进程的有效身份，不获取外部对象或转移资源。
+    // SAFETY: geteuid has no parameters and returns only this process's effective identity;
+    // it acquires no external object and transfers no resource ownership.
     let user = unsafe { libc::geteuid() };
     if !metadata.is_dir() || metadata.uid() != user || metadata.mode() & 0o077 != 0 {
+        // Refuse symlinks, foreign owners and shared directories before acquiring a pasteboard name.
         return Err("合成剪贴板只接受当前用户独占的真实目录".to_owned());
     }
-    // 项目固定前缀与三个实际整数形成有限ASCII名称，绝不可能落到General等系统板。
-    // 父拥有者在清板前保留该目录；原目录存活期间不能正常复用它的dev/inode身份。
+    // The project prefix and three real integers form a bounded ASCII name distinct from General.
+    // The parent retains this directory until cleanup, preventing ordinary device/inode reuse meanwhile.
     Ok(format!(
         "dev.omni.acceptance.clipboard.{user}.{}.{}",
         metadata.dev(),
@@ -120,17 +123,19 @@ fn fixture_pasteboard_name(root: &Path) -> Result<String, String> {
     ))
 }
 
-/// 回收已reap子进程的精确夹具板；调用者须仍拥有该未删除的独占合成目录。
-/// 不初始化NSApplication、不安装fixture，也不读取板内容或枚举系统中的其他板。
+/// Release the exact fixture pasteboard after its child is reaped, while its parent still owns
+/// the live exclusive directory. This creates no NSApplication or fixture and reads no board contents.
 ///
 /// # Errors
-/// 非主线程、目录已消失/非独占或身份不可读时拒绝清理，保留原目录供拥有者处理。
+/// Reject worker threads and missing, shared or unreadable directories, preserving the directory
+/// for its actual owner rather than guessing another namespace or enumerating system pasteboards.
 pub fn release_isolated_acceptance_pasteboard(root: &Path) -> Result<(), String> {
     MainThreadMarker::new().ok_or("合成剪贴板回收需要真实主线程")?;
     let name = fixture_pasteboard_name(root)?;
     let pasteboard = NSPasteboard::pasteboardWithName(&NSString::from_str(&name));
     release_named_pasteboard(&pasteboard);
-    Ok(()) // 若原正常退出已释放，此次只创建同名空板后立即归还，不伪称曾观察到遗留内容。
+    // A prior normal release makes this an empty-name acquisition/release, not evidence of old payloads.
+    Ok(())
 }
 
 /// Stream an exact one-MiB ASCII workload without allocating a second document-sized fixture string.
@@ -254,11 +259,11 @@ pub(super) fn install_fixture(
         // Never replace another session's authorities or redirect already-acquired native resources.
         return Err("acceptance fixture requires a fresh foreground owner".to_owned());
     }
-    // 在接纳任何数据前核原独占目录；名称可由持有该目录的父进程在异常退出后精确恢复。
+    // Validate the exclusive directory before accepting data; its parent can recover this exact name after failure.
     let name = fixture_pasteboard_name(root)?;
     // Establish only owned synthetic files; never substitute HOME or inspect a real vault/settings file.
     let locations = initialize_fixture(root)?;
-    // 同basename的不同fixture仍有不同dev/inode；只有本目录拥有者才可接管同一项目板。
+    // Identical directory basenames still have distinct device/inode identities and independent namespaces.
     let pasteboard = NSPasteboard::pasteboardWithName(&NSString::from_str(&name));
     // Initialize known synthetic content before a real clipboard-history surface can capture it.
     pasteboard.clearContents();

@@ -1,6 +1,9 @@
 #![no_main]
 #![no_std]
 
+// This standalone Carbon floor control is compiled directly by the benchmark script, never
+// linked into the product. Its fixed shortcut is independent of the user's stored binding.
+
 use core::ffi::c_void;
 use core::mem;
 use core::panic::PanicInfo;
@@ -22,12 +25,14 @@ const OMNI_HOT_KEY_MODIFIERS: u32 = (1 << 8) | (1 << 9);
 static BENCHMARK_HOT_KEY_RECEIVED: AtomicBool = AtomicBool::new(false);
 
 #[repr(C, packed(2))]
+/// Match Carbon's two-byte-packed event descriptor without relying on Rust's default layout.
 struct EventTypeSpec {
     event_class: u32,
     event_kind: u32,
 }
 
 #[repr(C, packed(2))]
+/// Keep both registration identity fields; one matching scalar cannot authorize delivery.
 struct EventHotKeyId {
     signature: u32,
     id: u32,
@@ -76,10 +81,13 @@ unsafe extern "C" {
 }
 
 #[panic_handler]
+/// A no-std comparison has no recovery runtime; abort rather than unwind across Carbon callbacks.
 fn abort_on_panic(_panic: &PanicInfo<'_>) -> ! {
+    // SAFETY: The platform abort primitive never returns and borrows no Rust-owned value.
     unsafe { abort() }
 }
 
+/// Read only the original typed event payload and reject any other registration's notification.
 unsafe extern "C" fn accept_registered_hot_key(
     _next_handler: EventHandlerCallRef,
     event: EventRef,
@@ -92,6 +100,8 @@ unsafe extern "C" fn accept_registered_hot_key(
         signature: 0,
         id: 0,
     };
+    // SAFETY: Carbon lent this event for the callback. The exact typed stack buffer remains
+    // allocated for the synchronous parameter read; optional metadata outputs are intentionally null.
     let status = unsafe {
         GetEventParameter(
             event,
@@ -106,6 +116,7 @@ unsafe extern "C" fn accept_registered_hot_key(
     if status != 0 {
         return status;
     }
+    // A successful payload read still needs both fields to match this control's registration.
     if received_hot_key.signature != OMNI_HOT_KEY_SIGNATURE
         || received_hot_key.id != OMNI_HOT_KEY_IDENTIFIER
     {
@@ -113,12 +124,14 @@ unsafe extern "C" fn accept_registered_hot_key(
     }
 
     #[cfg(omni_shortcut_probe)]
+    // This single scalar is only an exit condition for the explicit probe build, never a product receipt.
     BENCHMARK_HOT_KEY_RECEIVED.store(true, Ordering::Relaxed);
 
     0
 }
 
 #[unsafe(no_mangle)]
+/// Own one handler and one hot key for the process lifetime, without constructing AppKit or an allocator.
 pub extern "C" fn main() -> i32 {
     const EVENT_CLASS_KEYBOARD: u32 = 0x6b65_7962;
     const EVENT_HOT_KEY_PRESSED: u32 = 5;
@@ -133,6 +146,8 @@ pub extern "C" fn main() -> i32 {
     let mut installed_handler = ptr::null_mut();
     let mut registered_hot_key = ptr::null_mut();
 
+    // SAFETY: The event descriptor and registration buffers remain live throughout the native
+    // calls. Every received event is released before the next iteration; no pointer escapes to Rust.
     unsafe {
         let event_dispatcher = GetEventDispatcherTarget();
         if InstallEventHandler(
@@ -146,6 +161,8 @@ pub extern "C" fn main() -> i32 {
         {
             return 1;
         }
+        // Failure ends this standalone process. Carbon registrations cannot outlive their process;
+        // this historical comparison does not provide the product's explicit close-release evidence.
         if RegisterEventHotKey(
             OMNI_HOT_KEY_CODE,
             OMNI_HOT_KEY_MODIFIERS,
@@ -157,6 +174,7 @@ pub extern "C" fn main() -> i32 {
         {
             return 1;
         }
+        // Block in Carbon instead of polling. This floor control deliberately owns no text or window.
         loop {
             let mut received_event = ptr::null_mut();
             if ReceiveNextEvent(1, &event_type, -1.0, 1, &mut received_event) != 0
@@ -164,10 +182,12 @@ pub extern "C" fn main() -> i32 {
             {
                 return 1;
             }
+            // Dispatch synchronously while this event is live, then return the retained Carbon event.
             let _ = SendEventToEventTarget(received_event, event_dispatcher);
             ReleaseEvent(received_event);
 
             #[cfg(omni_shortcut_probe)]
+            // Only the original matching callback ends the explicit delivery probe successfully.
             if BENCHMARK_HOT_KEY_RECEIVED.load(Ordering::Relaxed) {
                 return 0;
             }

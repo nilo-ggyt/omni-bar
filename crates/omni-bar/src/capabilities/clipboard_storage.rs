@@ -804,8 +804,9 @@ fn content_matches_clipboard_query(content: &str, normalized_query: &str) -> boo
         // An empty foreground query lists the bounded history in recency order.
         return true;
     }
-    if normalized_query.is_ascii() {
-        // ASCII case matching can inspect byte windows without allocating another full body.
+    if normalized_query.is_ascii() && content.is_ascii() {
+        // Byte folding is equivalent to Unicode lowercase only when both sides are ASCII.
+        // A non-ASCII body can lowercase into ASCII, such as the Kelvin sign in "Kelvin".
         return content
             .as_bytes()
             .windows(normalized_query.len())
@@ -1091,6 +1092,15 @@ mod tests {
         let entry = &history.search("中文", 1).expect("CJK search")[0];
         assert!(entry.preview.starts_with("Build RELEASE 中文 "));
         assert!(entry.preview.chars().count() <= 180);
+        // A real persisted non-ASCII body can lowercase into an ASCII query. The byte fast path
+        // must not hide this visible result merely because the query itself is entirely ASCII.
+        history
+            .record("Unicode sign: Kelvin", 2)
+            .expect("record Unicode case mapping");
+        assert_eq!(
+            history.search("kelvin", 1).expect("Unicode body search")[0].preview,
+            "Unicode sign: Kelvin"
+        );
     }
 
     #[test]

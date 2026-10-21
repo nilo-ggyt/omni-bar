@@ -19,7 +19,9 @@ typedef struct {
 @property(nonatomic, weak) NSArray *results;
 @end
 
-/** Recognition reports token predicates only; recognized text never escapes the per-frame autorelease pool. */
+/** Recognition reports token predicates only; recognized text never escapes the per-frame autorelease pool.
+ * Seen means a literal token was observed; Certain additionally meets the fixed confidence threshold.
+ * nativeObjectsReleased covers handler/request/nonempty results only: the caller must separately release its crop. */
 typedef struct {
   BOOL succeeded;
   BOOL expectedSeen;
@@ -30,7 +32,8 @@ typedef struct {
   unsigned int observationCount;
 } OmniFrameRecognition;
 
-/** One serial observation tracks an absent positive baseline and strictly increasing displayed frames. */
+/** One serial observation requires positive OLD-token baseline evidence and strictly increasing supplied display ticks.
+ * These scalars do not establish actual capture completeness, input causality, or physical display scanout. */
 typedef struct {
   uint64_t startTicks;
   uint64_t lastTicks;
@@ -70,9 +73,11 @@ CVPixelBufferRef OmniFrameCreateBlankCrop(void) CF_RETURNS_RETAINED;
 CVPixelBufferRef OmniFrameCopyOwnedCrop(CVPixelBufferRef source, CGRect pixels) CF_RETURNS_RETAINED;
 /** Count explicitly owned image bytes only, excluding opaque framework/model/WindowServer allocations. */
 size_t OmniFrameOwnedCropBytes(void);
-/** Perform one synchronous local-pool recognition; crop stays immutable/alive until return, lifetime may be nil. */
+/** Perform one synchronous local-pool recognition; crop stays immutable/alive until return, lifetime may be nil.
+ * The caller retains ownership of the crop and must join its release with the returned native-object release predicate. */
 OmniFrameRecognition OmniFrameRecognize(CVPixelBufferRef crop, NSString *expected, NSString *baseline, OmniFrameRecognitionLifetime *lifetime);
 /** Validate zero-content bootstrap release; a single opaque request may remain weakly observed until process exit. */
 BOOL OmniFrameBootstrapIsValid(OmniFrameRecognition recognition, OmniFrameRecognitionLifetime *lifetime);
-/** Advance serial state only with a newly displayed frame whose actual native graph/image has passed release. */
+/** Advance caller-owned serial state only when the supplied recognition/release predicates and ordered display ticks agree.
+ * The caller supplies writable state and independently establishes native capture and image-release provenance. */
 OmniFrameSemanticOutcome OmniFrameAdvance(OmniFrameSemanticState *state, OmniFrameRecognition recognition, uint64_t displayTicks);

@@ -1,5 +1,6 @@
-//! 真实Host完整执行长文、巨段落、源模式与资源场景，最终观察5秒空前台驻留。
-//! 本入口只持合成路径、标量和原生弱证据；功能、保存、SDK回执与真实释放分别决定结果。
+//! Exercise long documents, giant paragraphs, source modes and resource lifetimes through the real Host.
+//! The final five-second empty-foreground observation retains only synthetic paths, scalars and weak
+//! native evidence. Functional results, saved bytes, SDK receipts and actual release remain separate gates.
 
 mod external_http;
 mod readiness;
@@ -35,7 +36,7 @@ const EVENT_SUBTYPE: i16 = 0x4f4d;
 const STEP_FIRST: isize = 100;
 const IDLE_SECONDS: u64 = 5;
 
-/// 原九个资源场景分别经过真实 SDK 激活和关闭，不复用上一场景的文稿或宿主回执。
+/// Each resource scenario acquires and closes a fresh real SDK session, without borrowing a prior document or receipt.
 const RESOURCE_CASES: [NativeMarkdownHostedResourceCase; 9] = [
     NativeMarkdownHostedResourceCase::UnsubmittedSearch,
     NativeMarkdownHostedResourceCase::SubmittedSearch,
@@ -48,8 +49,8 @@ const RESOURCE_CASES: [NativeMarkdownHostedResourceCase; 9] = [
     NativeMarkdownHostedResourceCase::SequentialReplaceFields,
 ];
 
-/// 前三轮反复核相同长文的真实资源生命周期；其后巨段落和四种源模式各从全新会话开始。
-/// 步骤由插件原工作负载持有，Host不维护第二份动作表，也不跳过巨段落的后半程。
+/// Repeat the long-document lifetime three times, then start fresh sessions for the giant paragraph and source flows.
+/// The plugin owns the sole step table; Host neither copies it nor omits the giant paragraph's later editing stages.
 const DOCUMENT_FLOWS: [NativeMarkdownHostedFlow; 8] = [
     NativeMarkdownHostedFlow::Full,
     NativeMarkdownHostedFlow::Full,
@@ -61,7 +62,7 @@ const DOCUMENT_FLOWS: [NativeMarkdownHostedFlow; 8] = [
     NativeMarkdownHostedFlow::SourceRelativeLink,
 ];
 
-/// 每个表格用例重新安装真实插件会话，单格历史、格式和冲突结果不能互相借票。
+/// Reacquire the real plugin session per table case so history, formatting and conflicts cannot share stale authority.
 const TABLE_CASES: [NativeMarkdownHostedTableCase; 8] = [
     NativeMarkdownHostedTableCase::Positive,
     NativeMarkdownHostedTableCase::Cancel,
@@ -73,17 +74,17 @@ const TABLE_CASES: [NativeMarkdownHostedTableCase; 8] = [
     NativeMarkdownHostedTableCase::FindReplacementComposition,
 ];
 
-/// 独立对照与同进程完整验收共用原 Driver；模式只决定何时接原步骤表，不改变产品交互。
+/// Standalone and same-process workloads share one driver; mode selects existing steps without changing product interaction.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Workload {
     Full,
     SystemIme,
-    /// 不打开浏览器的新页面；原八个文稿、表格、资源和中文流程仍完整串接。
+    /// Preserve all document, table, resource and Chinese-input flows without acquiring a new browser page.
     CoreUi,
     CompleteUi,
 }
 
-/// Host只接各插件工作负载拥有的具名动作；不会把外部整数解释成任意产品操作。
+/// Accept only actions named by their owning plugin workload, never arbitrary externally supplied native operations.
 #[derive(Clone, Copy)]
 enum WorkloadStep {
     Document(NativeMarkdownHostedStep),
@@ -92,17 +93,19 @@ enum WorkloadStep {
 }
 
 impl WorkloadStep {
-    /// 仅四种源模式的原末动作会同步发返回，其余用例由Host在成功终点之后发起。
+    /// Only source flows return synchronously from their final plugin step; Host closes other flows after verified success.
     fn closes_surface(self) -> bool {
         match self {
+            // The document workload owns which of its original steps requests the existing return interaction.
             Self::Document(step) => step.closes_surface(),
+            // Table and IME steps leave close initiation to the verified Host terminal boundary.
             Self::Table(_) => false,
             Self::Ime(_) => false,
         }
     }
 }
 
-/// 真实释放回执和后继事件中的弱证据分别观察；经过多久都不能补授完成权限。
+/// Observe actual release receipts separately from later weak evidence; elapsed time grants no completion authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Phase {
     WaitingLaunch,
@@ -126,14 +129,14 @@ enum Phase {
     Finished,
 }
 
-/// 已接纳关闭只取生产owner回调的真实标量，不能从driver预期阶段推断接纳。
+/// Accept close facts only from the real production owner, never from the driver's expected phase.
 #[derive(Clone, Copy)]
 enum AcceptedClose {
     Launcher(u64),
     Plugin(u64, PluginCommandTarget, PluginCloseRequest),
 }
 
-/// 分别核对关闭请求与真实接纳；拒绝、外来会话或仅终止应用的回执都不能授权继续等待。
+/// Match the requested close to actual admission; refused, foreign-session or terminal-only receipts cannot authorize waiting.
 fn matches_accepted_close(
     phase: Phase,
     expected_target: Option<PluginCommandTarget>,
@@ -141,7 +144,8 @@ fn matches_accepted_close(
 ) -> bool {
     match (phase, accepted) {
         (Phase::LauncherRelease { generation, .. }, Some(AcceptedClose::Launcher(actual))) => {
-            generation == actual // 只等待本次真实关闭动作已经建立的原代次。
+            // Wait only for the generation already established by this actual launcher close.
+            generation == actual
         }
         (
             Phase::PluginRelease {
@@ -150,14 +154,15 @@ fn matches_accepted_close(
             },
             Some(AcceptedClose::Plugin(actual, target, request)),
         ) => {
-            // 动态会话代次、静态目标和前台返回scope必须属于同一次真实关闭。
+            // Dynamic generation, static target and foreground return scope must identify this exact admitted close.
             generation == actual && expected_target == Some(target) && request == expected
         }
-        _ => false, // 接纳缺失、阶段类型不符或旧完成回执均保持失败，不改写当前关闭权限。
+        // Missing admission, a different phase or a stale receipt cannot rewrite current close authority.
+        _ => false,
     }
 }
 
-/// 有限事件值与driver代次共同拒绝重复、失序和先前轮次的迟到交付。
+/// Bounded event values and the driver epoch reject duplicate, reordered and prior-cycle delivery.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Stage {
     LauncherReady,
@@ -172,14 +177,14 @@ enum Stage {
     FinishIdle,
 }
 
-/// Pending只结束本次观察，不代表功能成功，也不授予关闭或下一轮权限。
+/// Pending ends this observation only; it proves no success and grants neither close nor next-cycle authority.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum StageOutcome {
     Completed,
     Pending,
 }
 
-/// 只保存本请求原终点的标量权限；旧轮次、旧driver或重复终点不能安排新事件。
+/// Preserve only this request's original scalar terminal authority, excluding old epochs and duplicate completion.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct StepTerminalSignal {
     epoch: u64,
@@ -188,10 +193,10 @@ struct StepTerminalSignal {
 }
 
 impl Stage {
-    /// 固定标量编码只表达本入口阶段，不接任意selector、插件身份或文件路径。
+    /// Encode fixed diagnostic stages, never arbitrary selectors, plugin identities or file paths.
     fn code(self) -> isize {
         match self {
-            // 结构事件使用互不重叠的固定编码；编辑步骤只取上方有限数组中的实际索引。
+            // Structural events have distinct fixed codes; editing events use only actual bounded workload indices.
             Self::LauncherReady => 1,
             Self::ActivatePlugin => 2,
             Self::ObservePlugin => 3,
@@ -205,7 +210,7 @@ impl Stage {
         }
     }
 
-    /// 未知事件编码没有成功默认值；调用方必须保留阶段失序的真实失败。
+    /// Reject unknown codes without a successful default, preserving the caller's actual ordering failure.
     fn decode(code: isize) -> Option<Self> {
         match code {
             1 => Some(Self::LauncherReady),
@@ -221,15 +226,16 @@ impl Stage {
                 if value >= STEP_FIRST
                     && workload_step((value - STEP_FIRST) as usize).is_some() =>
             {
-                // 先核原有符号范围再转usize，负值或越界值不能变成有效步骤索引。
+                // Check the signed range before conversion so negative or unknown indices cannot name a valid step.
                 Some(Self::Step((value - STEP_FIRST) as usize))
             }
-            _ => None, // 其它ApplicationDefined事件没有执行本验收动作的权限。
+            // Other ApplicationDefined events have no authority to execute this diagnostic workload.
+            _ => None,
         }
     }
 }
 
-/// 观察桥只保原生弱身份与文件事实；Rc不增加正文、窗口或SDK会话所有权。
+/// Observation bridges retain native weak identities and file facts; Rc adds no document, window or SDK-session ownership.
 struct Driver {
     epoch: u64,
     root: PathBuf,
@@ -239,33 +245,33 @@ struct Driver {
     step_terminal: Option<StepTerminalSignal>,
     completed_documents: usize,
     verified_editing_flows: usize,
-    /// 只由当前原步骤表的最后成功动作授予，清理与Host关闭回执均不能补签。
+    /// Granted only by the current workload's successful final step, never by cleanup or a later Host close receipt.
     workload_verified: bool,
     launcher_readiness: Option<Rc<LauncherReadinessWait>>,
     readiness_schedule: ReadinessSchedule,
     launcher_release: Option<Rc<LauncherReleaseProbe>>,
     target: Option<PluginCommandTarget>,
-    /// 静态 target 可重复；激活返回时就固定这一次宿主代次，失败清理也不能接管新会话。
+    /// Static targets repeat; capture this Host generation when activation returns so failed cleanup cannot take over a successor.
     session_generation: Option<u64>,
     hosted: Option<Rc<NativeMarkdownHostedWorkload>>,
-    /// 仅保当前原图的弱观察桥；计数只在真实 Host 收讫和磁盘/资源门通过后推进。
+    /// Observe only the original graph weakly; advance counts after the actual Host receipt and disk/resource checks.
     resource: Option<Rc<NativeMarkdownHostedResourceProbe>>,
     table: Option<Rc<NativeMarkdownHostedTableProbe>>,
     verified_table_cases: usize,
     verified_resource_cases: usize,
     first_failure: Option<String>,
-    // 两种串接验收都不重建 Driver/PID/origin；只有原完整流程的驻留终点才允许追加中文会话。
+    // Combined workloads retain one driver, PID and timing origin; append IME only after the complete first idle boundary.
     workload: Workload,
     full_idle_verified: bool,
     ime: Option<Rc<NativeMarkdownHostedImeProbe>>,
     ime_verified: bool,
-    /// 只有CompleteUi第八个文稿流程创建；原Full/SystemIme完全不取得监听器或浏览器资源。
+    /// Only CompleteUi's eighth document acquires this listener/browser authority; Full and SystemIme never do.
     external_http: Option<external_http::ExternalHttp>,
     external_http_handoff_verified: bool,
 }
 
 impl Driver {
-    /// 每个数量只在原 Native/SDK 关闭核验后增加；完整编辑次数仍由原末步保存验证授予。
+    /// Counts advance only after real native/SDK close verification; full-editing success also requires the original final save.
     fn full_workload_verified(&self) -> bool {
         self.completed_documents == DOCUMENT_FLOWS.len()
             && self.verified_editing_flows == CYCLES + 1
@@ -273,22 +279,25 @@ impl Driver {
             && self.verified_resource_cases == RESOURCE_CASES.len()
     }
 
-    /// 专项保持原入口；追加会话只能在完整流程和第一段原五秒驻留均成功后取得步骤权限。
+    /// The standalone IME entry stays independent; combined IME steps require the full flow and first five-second idle to pass.
     fn current_ime(&self) -> bool {
         match self.workload {
+            // Full alone never acquires an IME sequence; the focused entry starts with that sequence immediately.
             Workload::Full => false,
             Workload::SystemIme => true,
             Workload::CoreUi | Workload::CompleteUi => {
+                // Append IME once, only after the original full workload and its idle boundary actually succeeded.
                 self.full_idle_verified && self.full_workload_verified() && !self.ime_verified
             }
         }
     }
 
-    /// 串接验收第一次关闭进入原驻留，中文结束后才进入最终驻留；中间必须新走正式 Launcher。
+    /// Combined acceptance first enters the original idle, reopens the real launcher, then idles finally after IME success.
     fn closes_final_launcher(&self) -> bool {
         match self.workload {
             Workload::SystemIme => self.ime_verified,
             Workload::Full | Workload::CoreUi | Workload::CompleteUi => {
+                // Every native document/table/resource graph must close before either full-workload idle boundary.
                 let cases_closed = self.completed_documents == DOCUMENT_FLOWS.len()
                     && self.verified_table_cases == TABLE_CASES.len()
                     && self.verified_resource_cases == RESOURCE_CASES.len();
@@ -300,7 +309,7 @@ impl Driver {
         }
     }
 
-    /// 只有插件原步骤表的最后一步通过才允许正常关闭；特殊流程的末步本身已发正式返回。
+    /// Admit normal close only after the plugin's final step succeeds; special flows already returned from that step.
     fn accept_verified_workload(
         &mut self,
         index: usize,
@@ -308,11 +317,13 @@ impl Driver {
     ) -> Result<(), String> {
         let steps = self.current_step_count().ok_or("原工作负载已结束")?;
         let phase_matches = if closes_surface {
+            // A plugin-owned final return may already have established or completed the actual close transaction.
             matches!(
                 self.phase,
                 Phase::PluginRelease { .. } | Phase::VerifyPluginRelease
             )
         } else {
+            // Other final steps still belong to their original active step until Host requests return.
             self.phase == Phase::Step(index)
         };
         if !phase_matches
@@ -324,19 +335,21 @@ impl Driver {
             || self.first_failure.is_some()
             || self.workload_verified
         {
+            // A unique final step must have no unresolved signal, prior error or conflicting queued successor.
             return Err("原文稿验证不属于本会话唯一成功终点".to_owned());
         }
         self.workload_verified = true;
         if self.current_flow() == Some(NativeMarkdownHostedFlow::Full) {
-            // Full的最后一步是恢复原文后的正式保存验证；其余场景各有自己的原保存断言。
+            // Full's final step verifies saving after original-text restoration; other flows own their distinct save assertions.
             self.verified_editing_flows += 1;
         }
         Ok(())
     }
 
-    /// 当前流程只由已完成且释放的文稿数量选择，外来事件不能自行指定工作负载或步骤。
+    /// Choose the current flow solely from released-document progress, excluding externally selected workloads or indices.
     fn current_flow(&self) -> Option<NativeMarkdownHostedFlow> {
         if self.workload == Workload::SystemIme {
+            // The focused input sequence owns no preceding document workload.
             return None;
         }
         DOCUMENT_FLOWS
@@ -346,16 +359,19 @@ impl Driver {
                 if self.workload == Workload::CompleteUi
                     && flow == NativeMarkdownHostedFlow::SourceRelativeLink
                 {
+                    // Only the declared complete-UI variant substitutes the existing HTTP handoff workload.
                     NativeMarkdownHostedFlow::SourceRelativeLinkHttp
                 } else {
+                    // All other modes keep the plugin's original document step table unchanged.
                     flow
                 }
             })
     }
 
-    /// 表格只能在全部文稿流程释放后开始，当前case索引不能由Native回调修改。
+    /// Begin table cases only after all document flows release; native callbacks cannot choose their own case index.
     fn current_table_case(&self) -> Option<NativeMarkdownHostedTableCase> {
         if self.workload == Workload::SystemIme {
+            // The standalone IME workload has no table phase and must not reuse a preceding case's identity.
             return None;
         }
         (self.completed_documents == DOCUMENT_FLOWS.len())
@@ -363,9 +379,10 @@ impl Driver {
             .flatten()
     }
 
-    /// 步骤长度来自插件的单一原表；Host只据此核队列索引与末动作，不复制功能契约。
+    /// Read lengths from the plugin's sole step table to validate indices/final actions without copying its functional contract.
     fn current_step_count(&self) -> Option<usize> {
         if self.current_ime() {
+            // Input steps come from the original finite IME table, without a Host-owned copy of that workflow.
             return Some(NativeMarkdownHostedImeStep::ALL.len());
         }
         self.current_flow()
@@ -373,15 +390,17 @@ impl Driver {
             .or_else(|| self.current_table_case().map(|case| case.steps().len()))
     }
 
-    /// 仅从插件拥有的当前具名步骤表取动作，不转换任意selector或重新发现文稿。
+    /// Select a named action from the current plugin-owned table, never an arbitrary selector or rediscovered document.
     fn current_step(&self, index: usize) -> Option<WorkloadStep> {
         if self.current_ime() {
+            // Checked indexing cannot turn a stale or external integer into an input action.
             return NativeMarkdownHostedImeStep::ALL
                 .get(index)
                 .copied()
                 .map(WorkloadStep::Ime);
         }
         if let Some(flow) = self.current_flow() {
+            // Active documents retain precedence until their actual release count permits tables to begin.
             return flow.steps().get(index).copied().map(WorkloadStep::Document);
         }
         self.current_table_case()?
@@ -391,7 +410,7 @@ impl Driver {
             .map(WorkloadStep::Table)
     }
 
-    /// 登记一个原终点观察；已有待交付信号或排队核验不能被另一观察替换。
+    /// Reserve one original terminal observation without replacing an unresolved signal or queued verification.
     fn begin_step_terminal(&mut self, index: usize) -> Result<StepTerminalSignal, String> {
         if self.current_step(index).is_none()
             || self.phase != Phase::Step(index)
@@ -399,6 +418,7 @@ impl Driver {
             || self.step_terminal.is_some()
             || self.first_failure.is_some()
         {
+            // A valid step has one current phase and no earlier pending work or failure to overwrite.
             return Err("整产品原步骤终点观察重复、失序或已撤权".to_owned());
         }
         let signal = StepTerminalSignal {
@@ -410,7 +430,7 @@ impl Driver {
         Ok(signal)
     }
 
-    /// 原终点信号只授权一次核验事件；实际功能结果仍须由该步骤自己的条件证明。
+    /// Consume one original terminal signal; its step must still independently prove the actual functional result.
     fn accept_step_terminal(&mut self, signal: StepTerminalSignal) -> bool {
         if self.step_terminal != Some(signal)
             || signal.epoch != self.epoch
@@ -419,85 +439,92 @@ impl Driver {
             || self.pending.is_some()
             || self.first_failure.is_some()
         {
-            return false; // 旧通知或清理通知保持无副作用，不能消费当前另一份观察。
+            // Old or cleanup notifications cannot consume another current step's observation.
+            return false;
         }
         self.step_terminal = None;
         true
     }
 
-    /// 先消费原标量事件权限；状态借用结束后才调用Native getter或丢弃Rc/Weak。
+    /// Consume scalar event authority before any native getter or Rc/Weak destruction outside the state borrow.
     fn accept_event(
         &mut self,
         epoch: isize,
         stage: Option<Stage>,
     ) -> Option<Result<Stage, String>> {
         if epoch != self.epoch as isize || self.phase == Phase::Finished {
-            // 旧代次或已停止driver保持无副作用，不占用当前后继事件。
+            // Old epochs and stopped drivers stay inert, preserving the current queued successor.
             return None;
         }
         Some(match stage {
             Some(stage) if self.pending == Some(stage) => {
+                // The exact pending event consumes its reservation once before native work may reenter.
                 self.pending = None;
                 Ok(stage)
             }
+            // A matching epoch still cannot accept an unrequested, duplicated or reordered stage.
             _ => Err("整产品阶段交付失序或重复".to_owned()),
         })
     }
 }
 
-/// install_fixture之后的每条返回路径都归还本工具命名剪贴板和注入路径，失败也不能遗留。
+/// Release this tool's named pasteboard and injected paths on every return after fixture installation, including failure.
 struct FixtureScope;
 
 impl Drop for FixtureScope {
+    /// End only this main-thread fixture's authority without retaining a TLS borrow across native cleanup.
     fn drop(&mut self) {
-        // 只有真实主线程入口构造此owner；共享清理先取走TLS所有权，再执行可能重入的释放。
+        // The real main-thread entry creates this scope; shared cleanup takes the owner before reentrant release.
         super::acceptance_fixture::clear_fixture();
     }
 }
 
 thread_local! {
-    /// 默认产品不编译这些槽；验收停止后不保业务资源或采样历史。
+    /// Normal products omit these slots; stopped acceptance retains neither business resources nor sample history.
     static DRIVER: RefCell<Option<Driver>> = const { RefCell::new(None) };
     static NEXT_EPOCH: Cell<u64> = const { Cell::new(0) };
 }
 
 define_class!(
-    /// 只接本验收的非输入事件；其余事件完整交还真实NSApplication处理。
-    // SAFETY: 此NSApplication子类没有额外Rust ivars；主线程首次sharedApplication创建唯一应用对象。
+    /// Consume only this diagnostic's non-input events and forward all other input to the original NSApplication.
+    // SAFETY: this NSApplication subclass adds no Rust ivars; the first main-thread sharedApplication
+    // acquisition constructs the process's sole application object.
     #[unsafe(super = NSApplication)]
     #[thread_kind = MainThreadOnly]
     struct ProductAcceptanceApplication;
 
     impl ProductAcceptanceApplication {
         #[unsafe(method(sendEvent:))]
+        /// Observe the original dispatch return without keeping driver or foreground borrows on the native stack.
         fn send_event(&self, event: &NSEvent) {
             if route_event(event) {
-                // 只消费匹配的诊断subtype；键盘、鼠标和正式菜单事件仍走原产品路由。
+                // Only the diagnostic subtype is consumed; keyboard, mouse and menu input retains production routing.
                 return;
             }
-            // SAFETY: 原event在主线程同步栈内存活；匹配的super selector保持NSApplication公开ABI。
+            // SAFETY: the original event lives through this synchronous main-thread stack and the superclass
+            // selector preserves NSApplication's public ABI.
             unsafe { let _: () = msg_send![super(self), sendEvent: event]; }
             if event.r#type() == NSEventType::LeftMouseDown {
-                // 原按钮的Down/tracking已真正返回，才从当前driver复制表格验收桥。
-                // 不跨super保DRIVER或ACTIVE租约，Native重入不能继承此前借用的原图。
+                // Copy the current weak table bridge only after original mouse tracking returns.
+                // No DRIVER or ACTIVE borrow spans super, so native reentry cannot inherit a stale graph lease.
                 let probe = DRIVER.with_borrow(|slot| {
                     slot.as_ref()?.table.as_ref().map(Rc::clone)
                 });
                 if let Some(probe) = probe
                     && let Err(error) = probe.did_dispatch_hosted_event(event)
                 {
-                    // MD只匹配事前保存的原Down唯一编号及窗口等派发值，再归还有限事件租约。
-                    // 这里只记鼠标返回；实际selector可更晚交付，不据此猜业务已经入队。
+                    // Markdown matches the original Down event number/window and releases its bounded event lease.
+                    // Mouse return alone cannot prove the later selector delivered or queued business work.
                     fail(error);
                 }
             }
         }
 
         #[unsafe(method(sendAction:to:from:))]
-        /// 真实系统 target/action 返回边界；只在验收 App 中被动报告，不改产品 selector 或目标。
+        /// Observe the actual target/action return in the acceptance app without replacing the product selector or target.
         fn send_action(&self, action: Sel, target: Option<&AnyObject>, sender: Option<&AnyObject>) -> bool {
-            // SAFETY: 原selector/target/sender均来自本次AppKit同步调用，匹配公开NSApplication ABI；
-            // super恰执行一次并保留原bool结果，不持DRIVER/ACTIVE借用跨越真实业务派发。
+            // SAFETY: AppKit supplies the original selector/target/sender with the public NSApplication ABI.
+            // Invoke super once and preserve its Boolean result, without DRIVER/ACTIVE borrows across dispatch.
             let sent: bool = unsafe { msg_send![super(self), sendAction: action, to: target, from: sender] };
             let probe = DRIVER.with_borrow(|slot| {
                 slot.as_ref()?.table.as_ref().map(Rc::clone)
@@ -505,8 +532,8 @@ define_class!(
             if let Some(probe) = probe
                 && let Err(error) = probe.did_dispatch_hosted_action(action, target, sender, sent)
             {
-                // 原按钮的具体selector已返回才有业务排队证据；MD仍须等原Down和真实CPU终点。
-                // 失败沿原driver收尾，不能重发action、延长期限或把系统sent当业务完成。
+                // The original selector's return proves delivery only; Markdown still awaits its Down and CPU endpoints.
+                // Failure uses normal driver cleanup, never action replay, a longer deadline or treating sent as completion.
                 fail(error);
             }
             sent
@@ -514,10 +541,10 @@ define_class!(
     }
 );
 
-/// 单调时钟只定位步骤观察；它不能证明画面呈现、物理输入延迟或内存验收通过。
+/// Timestamp step observations monotonically without claiming presented frames, physical-input latency or memory success.
 fn emit(event: &str) {
     let metadata = DRIVER.with_borrow(|slot| {
-        // 只复制标量后结束业务状态借用，stdout输出不跨可能重入的租约。
+        // Copy scalars and end business-state borrowing before stdout I/O can reenter another boundary.
         slot.as_ref().map(|driver| {
             (
                 driver.completed_documents,
@@ -526,7 +553,7 @@ fn emit(event: &str) {
         })
     });
     if let Some((cycles, elapsed)) = metadata {
-        // 输出失败不改变产品关闭行为；父采样方必须把协议记录缺失作为失败。
+        // Output failure leaves close behavior unchanged; the external parent must reject missing protocol evidence.
         let _ = writeln!(
             std::io::stdout().lock(),
             "product_acceptance event={event} documents={cycles} mono_ns={elapsed}"
@@ -534,12 +561,12 @@ fn emit(event: &str) {
     }
 }
 
-/// 只为原已取得代次安排一个后继事件，不用timer或重试推断功能与资源进度。
+/// Queue one successor for the existing epoch; timers and retries cannot infer functional or resource progress.
 fn enqueue(stage: Stage) -> Result<(), String> {
     let epoch = DRIVER.with_borrow_mut(|slot| {
         let driver = slot.as_mut().ok_or("整产品 driver 已结束")?;
         if driver.phase == Phase::Finished || driver.pending.is_some() {
-            // 保留已排队事件；重复回调不能覆盖它的后继动作。
+            // Preserve the queued stage instead of allowing duplicate callbacks to replace its successor.
             return Err("整产品阶段重复排队".to_owned());
         }
         driver.pending = Some(stage);
@@ -561,22 +588,22 @@ fn enqueue(stage: Stage) -> Result<(), String> {
     Ok(())
 }
 
-/// 诊断subtype不能授权其它代次；每阶段只在真实事件回调自己的autorelease池中执行。
+/// Execute stages only in their real event callback's autorelease pool; subtype alone cannot authorize a foreign epoch.
 fn route_event(event: &NSEvent) -> bool {
     if event.r#type() != NSEventType::ApplicationDefined || event.subtype().0 != EVENT_SUBTYPE {
-        // 无关事件保持生产路由，driver存在不能成为吞掉用户输入的依据。
+        // Driver presence never authorizes swallowing unrelated product or user input.
         return false;
     }
     let epoch = event.data1();
     let event_code = event.data2();
     let stage = Stage::decode(event_code);
     let claim = DRIVER.with_borrow_mut(|slot| {
-        // data1已从原event复制；状态借用内只消费这些标量，不调用Native getter。
+        // Consume already-copied event scalars under the state borrow without invoking native getters.
         slot.as_mut()?.accept_event(epoch, stage)
     });
     if let Some(claim) = claim {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // 本事件结束时归还全部临时Native claim，再观察后继真实释放回执。
+            // Drain this event's temporary native claims before observing a later actual release receipt.
             autoreleasepool(|_| claim.and_then(operate))
         }))
         .unwrap_or_else(|_| Err("整产品原生事件发生 Rust panic".to_owned()));
@@ -587,35 +614,35 @@ fn route_event(event: &NSEvent) -> bool {
             result == Ok(StageOutcome::Pending)
         ));
         if let Err(error) = result {
-            // 在ABI边界把Rust panic固定为失败，不能展开穿过Objective-C调用栈。
+            // Convert Rust panic into failure at the ABI boundary instead of unwinding through Objective-C frames.
             fail(error);
         }
     }
     true
 }
 
-/// 从Active借出仅本同步栈使用的呈现句柄，结束owner借用后才调用Native getter。
+/// Lend presentation claims for this synchronous stack only, ending the Active-owner borrow before native getters.
 fn active_launcher() -> Result<LauncherPresentation, String> {
     super::ACTIVE_SURFACE
         .with_borrow(|surface| surface.as_ref().map(|surface| surface.presentation()))
         .ok_or_else(|| "真实 Launcher owner 不存在".to_owned())
 }
 
-/// 必须同时没有Native业务owner和未完成状态；窗口隐藏或单个session槽为空均不足以证明释放。
+/// Require every native business owner and transition to end; hidden windows or one empty session slot do not prove release.
 fn foreground_is_empty() -> bool {
     !super::ACTIVE_SURFACE.with_borrow(Option::is_some)
         && !super::CLOSING_SURFACE.with_borrow(Option::is_some)
         && !super::plugin_host::exists()
         && !super::builtins::is_open()
         && super::FOREGROUND_STATE.with_borrow(|state| {
-            // 同时核原前台、转移和销毁屏障；未消费barrier不能当成已完成的空前台。
+            // Inspect active identity, transition and destruction barrier together; an unconsumed barrier is unfinished ownership.
             state.active_surface().is_none()
                 && state.pending_transition().is_none()
                 && state.destroyed_barrier().is_none()
         })
 }
 
-/// 在启动与返回后观察正式Launcher，不创建替代窗口或推测输入已就绪。
+/// Observe the production launcher after launch/return without a substitute window or guessed input readiness.
 fn verify_launcher_ready() -> Result<StageOutcome, String> {
     DRIVER.with_borrow_mut(|slot| {
         slot.as_mut()
@@ -632,7 +659,7 @@ fn verify_launcher_ready() -> Result<StageOutcome, String> {
         })
     });
     if deferred_signal {
-        // 只消费本次getter栈内真实重入的通知；没有新通知的Pending不能自行排队重试。
+        // Consume only a real notification received during this getter stack; Pending without a new signal cannot self-retry.
         let epoch = launcher_readiness_wait()
             .ok_or("Launcher 原始等待已撤销")?
             .epoch;
@@ -641,39 +668,40 @@ fn verify_launcher_ready() -> Result<StageOutcome, String> {
     observed
 }
 
-/// 只观察原Launcher图；外层事件调度仍保留生产端每个真实就绪条件。
+/// Observe only the original launcher graph; event scheduling preserves every production readiness condition.
 fn observe_launcher_readiness() -> Result<StageOutcome, String> {
     let mtm = MainThreadMarker::new().ok_or("Launcher 验证需要主线程")?;
     let wait = launcher_readiness_wait().ok_or("Launcher 原始呈现弱身份缺失")?;
     if !wait.matches_active_owner() {
-        // 原图消失或关闭代次改变即撤权；新的Active owner不能替原图重启这轮验收。
+        // A lost graph or changed close generation revokes this observation; a successor cannot restart its predecessor's check.
         return Err("等待就绪期间原 Launcher 身份或关闭代际已变化".to_owned());
     }
     let launcher = active_launcher()?;
     let ready = launcher.input_readiness(mtm);
-    drop(launcher); // 后续关闭与独立释放核验前先归还getter产生的临时图句柄。
+    // Return getter-generated temporary graph claims before a later close and independent release verification.
+    drop(launcher);
     let state_matches = super::FOREGROUND_STATE.with_borrow(|state| {
         state.active_surface() == Some(ForegroundSurface::Launcher)
             && state.pending_transition().is_none()
             && state.destroyed_barrier().is_none()
     });
     if !state_matches || super::plugin_host::exists() || !wait.matches_active_owner() {
-        // 可见输入必须属于当前无在途转移的原owner；旧观察不能授予插件激活权限。
+        // Visible input must belong to the original current owner with no transition; stale facts grant no activation authority.
         return Err("Launcher 可见状态与 Host 所有权不一致".to_owned());
     }
     if !ready.is_ready() {
-        // show返回不证明key或焦点已交付；保原弱身份，等待后继真实通知再观察。
+        // show returning proves neither key status nor focus; keep weak identity and await a real later readiness notification.
         emit(&format!("launcher_readiness_pending facts={ready:?}"));
         return Ok(StageOutcome::Pending);
     }
     Ok(StageOutcome::Completed)
 }
 
-/// 正常关闭Launcher前先固定原图弱证据和本次关闭代次，不能在关闭后补采后继身份。
+/// Capture original weak graph evidence and close generation before normal launcher close, never from a successor afterward.
 fn close_launcher(final_close: bool) -> Result<(), String> {
     let wait = launcher_readiness_wait().ok_or("Launcher 关闭缺少原始呈现权限")?;
     if !wait.matches_active_owner() {
-        // 失败清理也只准关闭原图；等待期间出现的另一个owner不属于这份关闭权限。
+        // Failure cleanup may close only this original graph; an owner acquired while waiting is outside its authority.
         return Err("原 Launcher 关闭权限已失效".to_owned());
     }
     let release = active_launcher()?.release_probe()?;
@@ -681,7 +709,7 @@ fn close_launcher(final_close: bool) -> Result<(), String> {
         .checked_add(1)
         .ok_or("Launcher 关闭代际耗尽")?;
     if !wait.matches_active_owner() {
-        // 快照getter可能重入；再次核原弱身份，不能改用后继对象补签本次关闭。
+        // Snapshot getters may reenter; recheck original weak identity rather than substituting a successor's close proof.
         return Err("捕获 Launcher 释放证据期间原图已变化".to_owned());
     }
     let old_wait = DRIVER.with_borrow_mut(|slot| {
@@ -693,11 +721,12 @@ fn close_launcher(final_close: bool) -> Result<(), String> {
         };
         Ok::<_, String>(driver.launcher_readiness.take())
     })?;
-    drop(old_wait); // TLS借用外归还原弱元数据，不把旧等待跨过此次关闭。
+    // Drop original weak wait metadata outside TLS borrowing so it cannot survive into this close transaction.
+    drop(old_wait);
     super::try_request_launcher_close()
 }
 
-/// 核验只借原观察桥；桥不拥有Native图或SDK会话。
+/// Borrow the original verification bridge without adding native-graph or SDK-session ownership.
 fn hosted() -> Result<Rc<NativeMarkdownHostedWorkload>, String> {
     DRIVER
         .with_borrow(|slot| {
@@ -707,7 +736,7 @@ fn hosted() -> Result<Rc<NativeMarkdownHostedWorkload>, String> {
         .ok_or_else(|| "整产品 Markdown 原始观察桥缺失".to_owned())
 }
 
-/// 原请求实际到达终点后才排核验；同步完成的步骤也使用独立后继事件。
+/// Queue verification only after the original request reaches its endpoint, including a later event for synchronous completion.
 fn schedule_hosted_step(index: usize) -> Result<(), String> {
     let step = workload_step(index).ok_or("终点观察步骤越界")?;
     let signal = DRIVER.with_borrow_mut(|slot| {
@@ -715,7 +744,7 @@ fn schedule_hosted_step(index: usize) -> Result<(), String> {
             .ok_or("原步骤终点 driver 缺失")?
             .begin_step_terminal(index)
     })?;
-    // 继承原工作负载的三秒失败期限；只持同一原信号的标量，不保活动作、文稿或Native图。
+    // Preserve the workload's original three-second failure deadline and signal scalars, without retaining live graphs.
     let duration = match step {
         WorkloadStep::Ime(step) => step.deadline(),
         _ => Duration::from_secs(3),
@@ -733,13 +762,15 @@ fn schedule_hosted_step(index: usize) -> Result<(), String> {
                 })
             });
             if !current {
-                return; // 已有真实终点、取消、关闭或新会话时，旧失败通知没有读取后继图的权限。
+                // Completion, cancellation, close or replacement revokes this old timeout's access to a successor graph.
+                return;
             }
             if matches!(
                 step,
                 WorkloadStep::Document(NativeMarkdownHostedStep::VerifyRelativeLinkHttpUnchanged)
             ) {
-                // HTTP只等独占服务器的真实GET与响应写完；原相对链接源Body已经释放，不能拿它定位网络等待。
+                // HTTP awaits the exclusive server's real GET and completed response. The old source body
+                // already released and cannot supply diagnostics for this independent network endpoint.
                 DRIVER.with_borrow(|slot| {
                     if let Some(server) = slot
                         .as_ref()
@@ -751,14 +782,15 @@ fn schedule_hosted_step(index: usize) -> Result<(), String> {
             } else if let WorkloadStep::Document(step) = step
                 && let Ok(bridge) = hosted()
             {
-                bridge.diagnose_deadline(step); // 只读原票有限诊断，不推进执行器或签另一份Ready。
+                // Read bounded original-ticket diagnostics without advancing execution or granting another Ready ticket.
+                bridge.diagnose_deadline(step);
             }
             fail("原工作负载未在所属步骤期限内交付真实终点".to_owned());
         })
         .map_err(|_| "原步骤失败通知无法调度".to_owned())?;
     let terminal = match step {
         WorkloadStep::Document(NativeMarkdownHostedStep::VerifyRelativeLinkHttpUnchanged) => {
-            // 真实网络终点先到也保存在该唯一server；只在原Driver信号登记后消费，不另开轮询。
+            // The sole server retains an early real network endpoint until this original driver signal registers.
             DRIVER.with_borrow(|slot| {
                 slot.as_ref()
                     .and_then(|driver| driver.external_http.as_ref())
@@ -767,19 +799,23 @@ fn schedule_hosted_step(index: usize) -> Result<(), String> {
             })?
         }
         WorkloadStep::Document(step) => {
+            // Borrow the original document observer and deliver only this request's scalar terminal signal.
             hosted()?.observe_step_terminal(step, move || hosted_step_terminal(signal))?
         }
         WorkloadStep::Table(step) => {
+            // Table endpoints remain owned by their actual native table workload.
             table()?.observe_step_terminal(step, move || hosted_step_terminal(signal))?
         }
         WorkloadStep::Ime(step) => {
+            // IME completion comes from the actual existing input workload without switching input sources.
             ime()?.observe_step_terminal(step, move || hosted_step_terminal(signal))?
         }
     };
     if terminal {
-        // 已先完成或同步发布的终点消费同一原权限，不另等或伪造第二次通知。
+        // Already-completed or synchronous endpoints consume the same authority without a second synthetic notification.
         hosted_step_terminal(signal);
     } else {
+        // Pending is observation only; the original endpoint, never this log, schedules later verification.
         emit(&format!(
             "step_terminal_pending stage={} receipt=original",
             Stage::Step(index).code()
@@ -788,56 +824,58 @@ fn schedule_hosted_step(index: usize) -> Result<(), String> {
     Ok(())
 }
 
-/// MD先结束观察槽借用再交付回调；宿主只接标量，不读或保留Native对象与正文。
+/// Markdown ends its observation borrow before delivery; Host accepts scalars without retaining native objects or body text.
 fn hosted_step_terminal(signal: StepTerminalSignal) {
     let accepted = DRIVER.with_borrow_mut(|slot| {
         slot.as_mut()
             .is_some_and(|driver| driver.accept_step_terminal(signal))
     });
     if accepted && let Err(error) = enqueue(Stage::Step(signal.index)) {
-        fail(error); // 事件创建失败必须固定失败，不能留下已经完成却永远没有核验事件的等待。
+        // Event creation failure stays explicit rather than leaving completed work waiting forever for missing verification.
+        fail(error);
     }
 }
 
-/// 只取当前实际文稿的具名流程，终点通知不会获得选择下一会话的权限。
+/// Select the current document's named flow without granting terminal notifications a choice of next session.
 fn hosted_flow() -> Option<NativeMarkdownHostedFlow> {
     DRIVER.with_borrow(|slot| slot.as_ref()?.current_flow())
 }
 
-/// 当前动作仅从这次原工作负载选择，错误码或外来索引不能授予另一会话的输入权限。
+/// Resolve actions only from the original current workload; foreign indices or error codes grant no successor input authority.
 fn workload_step(index: usize) -> Option<WorkloadStep> {
     DRIVER.with_borrow(|slot| slot.as_ref()?.current_step(index))
 }
 
-/// 后继表格用例由已完成释放数量选择，旧回调不能复活上一场景。
+/// Choose the next table case from completed releases so old callbacks cannot revive a previous scenario.
 fn table_case() -> Option<NativeMarkdownHostedTableCase> {
     DRIVER.with_borrow(|slot| slot.as_ref()?.current_table_case())
 }
 
-/// 只借同一真实表格会话的弱观察桥，不保留SDK/Native业务所有权。
+/// Borrow only this real table session's weak observation bridge without retaining SDK/native business ownership.
 fn table() -> Result<Rc<NativeMarkdownHostedTableProbe>, String> {
     DRIVER
         .with_borrow(|slot| slot.as_ref()?.table.as_ref().map(Rc::clone))
         .ok_or_else(|| "原表格场景观察桥缺失".to_owned())
 }
 
-/// 只借当前生产会话的中文观察桥；不在 Host 持有输入法、文稿或候选窗口。
+/// Borrow the current production IME bridge without owning the input method, document or candidate window in Host.
 fn ime() -> Result<Rc<NativeMarkdownHostedImeProbe>, String> {
     DRIVER
         .with_borrow(|slot| slot.as_ref()?.ime.as_ref().map(Rc::clone))
         .ok_or_else(|| "原中文输入法观察桥缺失".to_owned())
 }
 
-/// 只观察原 Driver 已授予的当前步骤类别；完整模式不能在第一段驻留完成前偷跑输入法。
+/// Observe only the step category granted by the original driver; full mode cannot start IME before its first idle completes.
 fn ime_workload() -> bool {
     DRIVER.with_borrow(|slot| slot.as_ref().is_some_and(Driver::current_ime))
 }
 
-/// 所有长文与源模式流程完成后才选择资源场景，缺少当前场景不能冒充全部通过。
+/// Choose resource cases only after all long-document/source flows finish; absence of a current case proves no global success.
 fn resource_case() -> Option<NativeMarkdownHostedResourceCase> {
     DRIVER.with_borrow(|slot| {
         let driver = slot.as_ref()?;
         if driver.workload == Workload::SystemIme {
+            // The focused input workload deliberately owns no document/table/resource sequence.
             return None;
         }
         (driver.completed_documents == DOCUMENT_FLOWS.len()
@@ -847,16 +885,17 @@ fn resource_case() -> Option<NativeMarkdownHostedResourceCase> {
     })
 }
 
-/// 外部调用只借原观察桥；不把 Session、Native 控件或文稿放入宿主验证状态。
+/// Lend the original resource bridge without storing a session, native control or document in Host verification state.
 fn resource() -> Result<Rc<NativeMarkdownHostedResourceProbe>, String> {
     DRIVER
         .with_borrow(|slot| slot.as_ref()?.resource.as_ref().map(Rc::clone))
         .ok_or_else(|| "原资源场景观察桥缺失".to_owned())
 }
 
-/// 上一真实前台已释放后才重置本工具自己的有限样本；不覆盖仍映射中的文稿。
+/// Reset only this tool's finite fixture after the preceding real foreground releases, never while documents remain mapped.
 fn prepare_resource_fixture() -> Result<(), String> {
     if !foreground_is_empty() {
+        // Fixture replacement cannot overlap an existing session's mappings, snapshots or input authority.
         return Err("资源样本准备前仍有真实前台 owner".to_owned());
     }
     let workspace = DRIVER.with_borrow(|slot| {
@@ -877,16 +916,17 @@ fn prepare_resource_fixture() -> Result<(), String> {
     Ok(())
 }
 
-/// 只在真实前台为空时回收本入口独占workspace，附件等样本不会泄漏到下一会话。
+/// Recreate only this entry's exclusive workspace while real foreground ownership is empty, including prior attachment fixtures.
 fn reset_owned_workspace(workspace: &Path) -> Result<(), String> {
     if !foreground_is_empty() {
+        // A merely hidden or closing graph still owns data; reject mutation instead of guessing release from visibility.
         return Err("原前台尚未释放，不能重置合成笔记库".to_owned());
     }
     std::fs::remove_dir_all(workspace).map_err(|_| "无法归还原合成笔记库".to_owned())?;
     std::fs::create_dir(workspace).map_err(|_| "无法创建后继合成笔记库".to_owned())
 }
 
-/// 夹具仍按8KiB以内块写磁盘；巨段落从不在Host构造完整String。
+/// Stream fixtures to disk in chunks no larger than eight KiB; Host never constructs a complete giant-paragraph String.
 fn prepare_document_fixture() -> Result<(), String> {
     let (workspace, giant, http) = DRIVER.with_borrow(|slot| {
         let driver = slot.as_ref().ok_or("原长文driver缺失")?;
@@ -899,26 +939,31 @@ fn prepare_document_fixture() -> Result<(), String> {
     reset_owned_workspace(&workspace)?;
     let path = workspace.join("Acceptance.md");
     if giant {
+        // The plugin streams the declared giant paragraph directly into this freshly owned fixture file.
         omni_md_plugin::write_native_markdown_giant_paragraph_fixture(&path)
     } else {
+        // Ordinary long documents use the same bounded streaming fixture writer as their production probe.
         omni_md_plugin::write_native_markdown_memory_fixture(&path)
     }
     .map_err(|_| "流式合成文稿生成失败".to_owned())?;
     if http {
+        // Acquire external handoff authority only for its declared flow, after exclusive fixture reset.
         let mut server = Some(external_http::ExternalHttp::new()?);
         DRIVER.with_borrow_mut(|slot| {
             let driver = slot.as_mut().ok_or("HTTP夹具原driver已结束")?;
             if driver.external_http.is_some() || driver.external_http_handoff_verified {
+                // Neither an existing listener nor completed handoff can be replaced by another fixture operation.
                 return Err("HTTP夹具不得重复创建或接管已完成交接".to_owned());
             }
             driver.external_http = server.take();
             Ok(())
-        })?; // 未交接的server在TLS借用结束后由本地唯一owner取消/join。
+        })?;
+        // An untransferred server stays in the local Option and cancels/joins only after TLS borrowing ends.
     }
     Ok(())
 }
 
-/// 样本文字由插件原用例唯一拥有；Host只在已释放的独占目录创建所需文件。
+/// The plugin case owns its fixture text; Host writes required files only into its released exclusive directory.
 fn prepare_table_fixture(case: NativeMarkdownHostedTableCase) -> Result<(), String> {
     let workspace = DRIVER
         .with_borrow(|slot| slot.as_ref().map(|driver| driver.root.join("workspace")))
@@ -931,7 +976,7 @@ fn prepare_table_fixture(case: NativeMarkdownHostedTableCase) -> Result<(), Stri
     .map_err(|_| "无法创建原表格合成样本".to_owned())
 }
 
-/// 动作前绑定真实 Session 代次与精确关闭方向；同步完成回调也只能消费这一次观察。
+/// Bind the actual session generation and exact close intent before action, limiting synchronous completion to this observation.
 fn begin_plugin_close_observation(intent: PluginCloseIntent) -> Result<(), String> {
     let generation =
         super::plugin_host::product_probe_generation().ok_or("真实插件 session 代际缺失")?;
@@ -942,6 +987,7 @@ fn begin_plugin_close_observation(intent: PluginCloseIntent) -> Result<(), Strin
     DRIVER.with_borrow_mut(|slot| {
         let driver = slot.as_mut().ok_or("插件关闭 driver 缺失")?;
         if driver.session_generation != Some(generation) {
+            // Reused static identity does not permit cleanup to close a later activation of the same plugin.
             return Err("原插件激活代次已经改变，不能关闭后继会话".to_owned());
         }
         driver.phase = Phase::PluginRelease {
@@ -952,7 +998,7 @@ fn begin_plugin_close_observation(intent: PluginCloseIntent) -> Result<(), Strin
     })
 }
 
-/// 实际 Host 释放之后显示或继续观察原 Launcher；同步呈现通知与此出口共用原去重调度。
+/// Show or continue observing the original launcher after actual Host release, sharing presentation-notification deduplication.
 fn resume_launcher_after_release() -> Result<(), String> {
     let epoch = DRIVER
         .with_borrow(|slot| {
@@ -962,6 +1008,7 @@ fn resume_launcher_after_release() -> Result<(), String> {
         })
         .ok_or("释放后的 Launcher 观察权限已结束")?;
     if super::ACTIVE_SURFACE.with_borrow(Option::is_none) {
+        // Reconstruct only when no launcher adapter exists; callbacks observe the published production owner.
         let mtm = MainThreadMarker::new().ok_or("资源完成需要原主线程")?;
         super::show_launcher_surface(mtm);
     }
@@ -969,28 +1016,31 @@ fn resume_launcher_after_release() -> Result<(), String> {
     Ok(())
 }
 
-/// 正常返回前先绑定本次真实会话代次；调用插件返回动作，不用退出整个应用代替关闭。
+/// Bind this real session generation before invoking its existing plugin-return action, without substituting process quit.
 fn request_return() -> Result<(), String> {
     let editing_verified = DRIVER.with_borrow(|slot| {
         slot.as_ref()
             .is_some_and(|driver| driver.workload_verified && driver.first_failure.is_none())
     });
     if !editing_verified {
-        // 只有本轮原文恢复和真实保存已核完才允许正常返回；失败清理另走原桥，始终保留失败结果。
+        // Only restored original text and verified real save authorize successful return; cleanup keeps its separate failing result.
         return Err("本轮编辑和正式保存尚未完成验证，不能记录成功返回".to_owned());
     }
     begin_plugin_close_observation(PluginCloseIntent::ExitToLauncher)?;
     emit("plugin_return_requested");
     if table_case().is_some() {
+        // Table return follows the original table surface action and its existing cell/history preflight.
         table()?.request_return(false)
     } else if ime_workload() {
+        // IME return uses the real input workload's own save/composition contract.
         ime()?.request_return()
     } else {
+        // Document flows share the original document return path and cannot borrow a table or input receipt.
         hosted()?.request_return()
     }
 }
 
-/// 一个原事件只执行一个动作；释放阶段由生产回调交付的实际回执推进，不在动作返回时推定完成。
+/// Execute one action per original event; only actual production release receipts advance teardown after action returns.
 fn operate(stage: Stage) -> Result<StageOutcome, String> {
     let phase = DRIVER
         .with_borrow(|slot| slot.as_ref().map(|driver| driver.phase))
@@ -1014,7 +1064,7 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                 && state.pending_transition().is_none()
         });
         if super::plugin_host::product_probe_generation() != Some(expected.0) || !current {
-            // 原事件排队期间用户可关闭/重新打开插件；相同静态命令或路径不能接管新实例的输入。
+            // Close/reopen can occur while this event queues; equal static commands or paths cannot authorize successor input.
             return Err("原插件会话在验收事件交付前已被关闭或替换".to_owned());
         }
     }
@@ -1022,7 +1072,7 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
     match (stage, phase) {
         (Stage::LauncherReady, Phase::LauncherReady) => {
             if verify_launcher_ready()? == StageOutcome::Pending {
-                // 尚未就绪就保留原图等待；只有属于原身份的新通知能排后继观察，不能先关闭或计成功。
+                // Keep the original graph while pending; only its new real notification can schedule another check or grant success.
                 return Ok(StageOutcome::Pending);
             }
             emit("launcher_ready visible=true input_ready=true sdk_session_owned=false");
@@ -1031,14 +1081,16 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                     driver.closes_final_launcher() || driver.first_failure.is_some()
                 })
             });
-            // 每次返回都重新核验真实Launcher就绪，再决定开始下一轮或结束最终前台。
+            // Reverify the real launcher after every return before starting another workload or ending the final foreground.
             close_launcher(final_close)?;
         }
         (Stage::ActivatePlugin, Phase::ActivatePlugin) => {
             if !foreground_is_empty() {
+                // Launcher close must satisfy actual resource release before any plugin can acquire a new graph.
                 return Err("原 Launcher 未完全释放，禁止插件激活".to_owned());
             }
             if ime_workload() {
+                // Recreate only the exclusive synthetic input fixture after the previous foreground has fully released.
                 let workspace = DRIVER
                     .with_borrow(|slot| slot.as_ref().map(|driver| driver.root.join("workspace")))
                     .ok_or("原中文验收目录缺失")?;
@@ -1047,10 +1099,13 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                     &workspace.join("Acceptance.md"),
                 )?;
             } else if resource_case().is_some() {
+                // Resource scenarios own their declared A/B documents and conflict/cell fixtures.
                 prepare_resource_fixture()?;
             } else if let Some(case) = table_case() {
+                // Each table case receives its plugin-owned exact fixture text in a fresh workspace.
                 prepare_table_fixture(case)?;
             } else if hosted_flow().is_some() {
+                // Long-document/source flows keep their bounded streaming initializer and optional handoff authority.
                 prepare_document_fixture()?;
             }
             let registration = *crate::composition::plugins::PluginCatalog::new()
@@ -1062,15 +1117,17 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                 .commands
                 .first()
                 .ok_or("真实插件命令描述为空")?;
-            // 从正式静态目录取得命令并激活；验收不靠插件ID或页面类型另造专用激活分支。
+            // Activate the real static catalog command without a plugin-ID-specific or page-specific alternate route.
             super::plugin_host::activate(registration, command.id)
                 .map_err(|error| error.to_string())?;
             let target = super::FOREGROUND_STATE
                 .with_borrow(|state| {
                     if let Some(ForegroundSurface::Plugin(target)) = state.active_surface() {
+                        // Copy the target actually published by production activation, independently of the requested descriptor.
                         Some(target)
                     } else {
-                        None // 激活已结束或前台类型错误都不代表Markdown已经挂载。
+                        // A completed inline action or another foreground kind cannot prove Markdown mounted.
+                        None
                     }
                 })
                 .ok_or("目录激活没有建立真实插件前台")?;
@@ -1088,6 +1145,7 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
         }
         (Stage::ObservePlugin, Phase::ObservePlugin) => {
             if ime_workload() {
+                // Observe the actual current input client only after production activation returns in an earlier event.
                 let path = DRIVER
                     .with_borrow(|slot| {
                         slot.as_ref()
@@ -1105,6 +1163,7 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                 return Ok(StageOutcome::Completed);
             }
             if let Some(case) = resource_case() {
+                // Bind this declared resource case to the actual A.md document, never a reconstructed session.
                 let path = DRIVER
                     .with_borrow(|slot| {
                         slot.as_ref()
@@ -1123,6 +1182,7 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                 return Ok(StageOutcome::Completed);
             }
             if let Some(case) = table_case() {
+                // The current native table owns its history and cells; retain only its original weak probe bridge.
                 let path = DRIVER
                     .with_borrow(|slot| {
                         slot.as_ref()
@@ -1147,6 +1207,7 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                 .ok_or("合成文档路径权限缺失")?;
             let flow = hosted_flow().ok_or("原长文流程缺失")?;
             let bridge = if flow == NativeMarkdownHostedFlow::SourceRelativeLinkHttp {
+                // Supply only this flow's exclusive nonce URL to the existing production link workload.
                 let url = DRIVER
                     .with_borrow(|slot| {
                         slot.as_ref()
@@ -1156,6 +1217,7 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                     .ok_or("HTTP流程没有原监听器URL")?;
                 NativeMarkdownHostedWorkload::observe_active_document_with_http_link(&path, &url)?
             } else {
+                // Other flows need no network resource and use their original document observation entry.
                 NativeMarkdownHostedWorkload::observe_active_document(&path, flow)?
             };
             DRIVER.with_borrow_mut(|slot| {
@@ -1164,7 +1226,7 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                     driver.phase = Phase::Step(0);
                 }
             });
-            // 激活与创建观察桥分属两个真实事件，借当前正式会话观察，不额外构造插件或替代会话。
+            // Activation and observation occur in separate real events, borrowing the published session without a replacement graph.
             schedule_hosted_step(0)?;
         }
         (Stage::Step(index), Phase::Step(expected)) if index == expected => {
@@ -1177,7 +1239,7 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                 step,
                 WorkloadStep::Document(NativeMarkdownHostedStep::RelativeLinkHttpMouseUp)
             ) {
-                // 先消费唯一网络动作登记，再让原正文投递Command鼠标；浏览器导航不可盲目重试。
+                // Consume the sole network-action reservation before the original body delivers Command-click; never retry navigation.
                 DRIVER.with_borrow(|slot| {
                     slot.as_ref()
                         .and_then(|driver| driver.external_http.as_ref())
@@ -1186,10 +1248,11 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                 })?;
             }
             if closes_surface {
-                // 四种特殊流程的最后一步在原同步栈发返回；必须在调用前固定真实Host关闭权限。
+                // Special flows return from their original final-step stack; bind actual Host close authority before invoking it.
                 begin_plugin_close_observation(PluginCloseIntent::ExitToLauncher)?;
             }
             match step {
+                // Each bridge invokes only its owning plugin workload, preserving the original action and input routes.
                 WorkloadStep::Document(step) => hosted()?.step(step)?,
                 WorkloadStep::Table(step) => table()?.step(step)?,
                 WorkloadStep::Ime(step) => ime()?.step(step)?,
@@ -1198,7 +1261,7 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                 step,
                 WorkloadStep::Document(NativeMarkdownHostedStep::VerifyRelativeLinkHttpUnchanged)
             ) {
-                // MD先核原Input/Source/磁盘/历史，Host再核真正HTTP终态；两个结果不能互相替代。
+                // Markdown checks original input/source/disk/history first; Host separately checks the real HTTP terminal state.
                 let mut server = DRIVER
                     .with_borrow_mut(|slot| {
                         slot.as_mut().and_then(|driver| driver.external_http.take())
@@ -1208,10 +1271,13 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                 let released = server.shutdown();
                 match (verified, released) {
                     (Err(primary), Err(cleanup)) => {
+                        // Preserve both the functional cause and independent listener/worker cleanup failure.
                         return Err(format!("{primary}；HTTP释放失败：{cleanup}"));
                     }
+                    // Cleanup success cannot excuse a failed handoff, nor can successful HTTP excuse leaked ownership.
                     (Err(primary), Ok(())) => return Err(primary),
                     (Ok(()), Err(cleanup)) => return Err(cleanup),
+                    // Publish success only after both independent boundaries actually completed.
                     (Ok(()), Ok(())) => {}
                 }
                 DRIVER.with_borrow_mut(|slot| {
@@ -1232,10 +1298,11 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                 })?;
                 emit("document_flow_verified full_steps=true original_data_checks=true");
                 if !closes_surface {
-                    // Full在真实恢复保存后另发返回，不能把生命周期收据当编辑成功证据。
+                    // Full returns after actual restoration/save; lifecycle receipts cannot stand in for editing success.
                     enqueue(Stage::Return)?;
                 }
             } else {
+                // Advance only after this exact step's original action succeeds, then observe the next real endpoint.
                 DRIVER.with_borrow_mut(|slot| {
                     if let Some(driver) = slot.as_mut() {
                         driver.phase = Phase::Step(index + 1);
@@ -1248,10 +1315,11 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
             if DRIVER.with_borrow(|slot| slot.as_ref().and_then(Driver::current_step_count))
                 == Some(index + 1) =>
         {
+            // The final verified step is the only event allowed to request the existing return interaction.
             request_return()?
         }
         (Stage::ResourceConfigure, Phase::ResourceConfigure) => {
-            // configure 只在退还原 Surface 租约后等待真实 CPU/活动格；没有测试版宿主端口。
+            // configure waits for actual CPU/active-cell state only after returning the surface borrow, without a test Host port.
             resource()?.configure()?;
             DRIVER.with_borrow_mut(|slot| {
                 if let Some(driver) = slot.as_mut() {
@@ -1263,18 +1331,21 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
         (Stage::ResourceInput, Phase::ResourceInput) => {
             let case = resource_case().ok_or("当前资源场景已失权")?;
             if case == NativeMarkdownHostedResourceCase::PendingNoteClose {
-                // 该原场景在真实侧栏交接动作的同一事务内关闭，必须先绑定精确收据身份。
+                // This scenario closes within the real sidebar handoff transaction; bind exact receipt identity before that input.
                 begin_plugin_close_observation(PluginCloseIntent::DismissAndResume)?;
             }
             let probe = resource()?;
             probe.input()?;
             if probe.input_started_close() {
                 if case != NativeMarkdownHostedResourceCase::PendingNoteClose {
+                    // Only the declared pending-note case may synchronously close as an input side effect.
                     return Err("资源输入没有本次精确关闭观察权限".to_owned());
                 }
             } else if probe.more_input_events() {
+                // The original resource workload owns its finite continuation count and exact next input action.
                 enqueue(Stage::ResourceInput)?;
             } else {
+                // No pending input remains, so close only in a later event after native input callbacks return.
                 DRIVER.with_borrow_mut(|slot| {
                     if let Some(driver) = slot.as_mut() {
                         driver.phase = Phase::ResourceClose;
@@ -1286,8 +1357,10 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
         (Stage::ResourceClose, Phase::ResourceClose) => {
             let case = resource_case().ok_or("资源关闭场景已失权")?;
             let intent = if case == NativeMarkdownHostedResourceCase::UnsubmittedSearch {
+                // This original case explicitly returns to Launcher while discarding no committed document input.
                 PluginCloseIntent::ExitToLauncher
             } else {
+                // Other resource cases retain their original dismissal/resume identity and close preflight.
                 PluginCloseIntent::DismissAndResume
             };
             begin_plugin_close_observation(intent)?;
@@ -1307,6 +1380,7 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                 if super::plugin_host::exists()
                     || super::plugin_host::product_probe_generation().is_some()
                 {
+                    // A real Host receipt still requires both session ownership and generation authority to be absent.
                     stop_loop();
                     return Err("无观察桥清理没有归还原 SDK 会话".to_owned());
                 }
@@ -1317,28 +1391,32 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                         driver.phase = Phase::LauncherReady;
                     }
                 });
-                // 原首帧/身份失败仍是失败；只确认真实 Host 回执，绝不补造 MD 弱证据或场景成功。
+                // Preserve the first-frame/identity failure; acknowledge Host release without inventing Markdown weak evidence or success.
                 emit("cleanup_without_observation_bridge host_released=true acceptance=false");
                 resume_launcher_after_release()?;
                 return Ok(StageOutcome::Completed);
             }
             if ime_workload() {
+                // Chinese-input release remains independently verified on its original native client and SDK owner.
                 let cleanup_only = DRIVER.with_borrow(|slot| {
                     slot.as_ref()
                         .is_some_and(|driver| driver.first_failure.is_some())
                 });
                 let verified = ime()?.verify_native_closed();
                 if !cleanup_only {
+                    // Ordinary success must pass the native close proof; cleanup cannot manufacture a passed IME flow.
                     verified?;
                 }
                 if super::plugin_host::exists()
                     || super::plugin_host::product_probe_generation().is_some()
                 {
+                    // Native close alone cannot release a still-owned SDK session or authorize another launcher.
                     return Err("中文原 Native 已释放但 SDK 会话仍被持有".into());
                 }
                 let old = DRIVER.with_borrow_mut(|slot| {
                     let driver = slot.as_mut()?;
                     driver.ime_verified = !cleanup_only && driver.workload_verified;
+                    // Revoke the completed session's step/target authority before returning its weak bridge outside this borrow.
                     driver.workload_verified = false;
                     driver.target = None;
                     driver.session_generation = None;
@@ -1351,33 +1429,38 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                 return Ok(StageOutcome::Completed);
             }
             if resource_case().is_some() {
+                // Resource release and success accounting stay distinct, including cleanup after the first functional error.
                 let cleanup_only = DRIVER.with_borrow(|slot| {
                     slot.as_ref()
                         .is_some_and(|driver| driver.first_failure.is_some())
                 });
                 let verified = resource()?.verify_closed();
                 if !cleanup_only {
+                    // Only a normal successful scenario may let the original native/resource proof authorize progression.
                     verified?;
                 } else if verified.is_err() {
-                    // 原业务首错仍保留；真实 Host 已收讫释放，这里不能因第二次失败遗失最终清理方向。
+                    // Preserve the first functional cause and actual Host receipt even if this additional cleanup proof also fails.
                     emit("resource_cleanup_verified=false acceptance=false");
                 }
                 if super::plugin_host::exists()
                     || super::plugin_host::product_probe_generation().is_some()
                 {
+                    // Released native views cannot waive a remaining real SDK session or generation owner.
                     return Err("资源原 Native 已释放但真实 SDK Session 仍被持有".to_owned());
                 }
                 let old = DRIVER.with_borrow_mut(|slot| {
                     let driver = slot.as_mut()?;
                     if !cleanup_only {
+                        // Cleanup after failure never contributes another passed business case, even when native resources released.
                         driver.verified_resource_cases += 1;
-                    } // 错误后的清理不增加业务成功数量，即使 Native 图已经实际释放。
+                    }
                     driver.target = None;
                     driver.session_generation = None;
                     driver.phase = Phase::LauncherReady;
                     driver.resource.take()
                 });
-                drop(old); // 弱观察桥同样在 TLS 借用外归还，不把九轮证据常驻为业务状态。
+                // Release weak bridge metadata outside TLS borrowing rather than retaining all nine prior cases as business state.
+                drop(old);
                 emit(&format!(
                     "resource_case_closed sdk_session_dropped=true host_barrier_consumed=true workload_passed={}",
                     !cleanup_only,
@@ -1386,24 +1469,29 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                 return Ok(StageOutcome::Completed);
             }
             if table_case().is_some() {
+                // The original table client must close before its step success can count as a completed table case.
                 let cleanup_only = DRIVER.with_borrow(|slot| {
                     slot.as_ref()
                         .is_some_and(|driver| driver.first_failure.is_some())
                 });
                 let verified = table()?.verify_native_closed();
                 if !cleanup_only {
+                    // Normal completion requires the native close proof; failed-flow cleanup never grants case success.
                     verified?;
                 } else if verified.is_err() {
+                    // Report additional cleanup failure while retaining the already-recorded first functional cause.
                     emit("table_cleanup_verified=false acceptance=false");
                 }
                 if super::plugin_host::exists()
                     || super::plugin_host::product_probe_generation().is_some()
                 {
+                    // The Host session/generation must end independently of the table's native weak evidence.
                     return Err("表格Native已释放但Host仍持原SDK会话".to_owned());
                 }
                 let old = DRIVER.with_borrow_mut(|slot| {
                     let driver = slot.as_mut()?;
                     if !cleanup_only && driver.workload_verified {
+                        // Only the original successful final step plus actual close increases the completed case count.
                         driver.verified_table_cases += 1;
                     }
                     driver.workload_verified = false;
@@ -1426,19 +1514,22 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
             });
             let verified = hosted()?.verify_native_closed();
             if !cleanup_only {
+                // Successful document accounting requires independent release verification on the original bridge.
                 verified?;
             } else if verified.is_err() {
-                // 首错保持失败，真实Host已释放后仍须归还观察桥及返回的Launcher。
+                // Preserve the first error while still releasing the observer and returned launcher after the actual Host receipt.
                 emit("document_cleanup_verified=false acceptance=false");
             }
             if super::plugin_host::exists()
                 || super::plugin_host::product_probe_generation().is_some()
             {
+                // An empty native graph is insufficient while Host still owns the real SDK session/generation.
                 return Err("Native弱证据完成但Host仍持SDK会话".to_owned());
             }
             let old_bridge = DRIVER.with_borrow_mut(|slot| {
                 let driver = slot.as_mut()?;
                 if !cleanup_only && driver.workload_verified {
+                    // Cleanup and lifecycle receipts cannot increase document success without its original verified final step.
                     driver.completed_documents += 1;
                 }
                 driver.workload_verified = false;
@@ -1447,7 +1538,8 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                 driver.phase = Phase::LauncherReady;
                 driver.hosted.take()
             });
-            drop(old_bridge); // 只保标量结果，下一轮不持先前文稿、Native图或动作观察。
+            // Keep scalar results only; no earlier document, native graph or action observation survives into the next round.
+            drop(old_bridge);
             emit(&format!(
                 "document_flow_closed native_closed=true sdk_session_dropped=true host_barrier_consumed=true workload_passed={}",
                 !cleanup_only,
@@ -1456,6 +1548,7 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
         }
         (Stage::FinishIdle, Phase::Idle) => {
             if !foreground_is_empty() {
+                // New ownership invalidates this idle interval rather than being hidden by a successful timer callback.
                 return Err("最终驻留窗口内出现新的业务 owner".to_owned());
             }
             let append_ime = DRIVER.with_borrow_mut(|slot| {
@@ -1463,15 +1556,17 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                 if matches!(driver.workload, Workload::CoreUi | Workload::CompleteUi)
                     && !driver.full_idle_verified
                 {
-                    // 第一段五秒原事件已真正到达；原计数来自各自 SDK/Native 关闭，而非计划数量。
-                    // 此处只接续同一个进程，不重置 origin、峰值采样、夹具或全局快捷键生命周期。
+                    // The original five-second endpoint arrived; counts come from actual SDK/native close receipts.
+                    // Continue the same process without resetting timing, peak observation, fixture or global shortcut lifetime.
                     if !driver.full_workload_verified() || driver.first_failure.is_some() {
+                        // Missing full-flow evidence or any previous failure forbids appending an apparently successful IME run.
                         return Err("完整流程或其原驻留尚未通过，不能追加中文验收".to_owned());
                     }
                     driver.full_idle_verified = true;
                     driver.phase = Phase::LauncherReady;
                     Ok(true)
                 } else {
+                    // A standalone workload or the combined workload's second idle ends this one driver's lifetime.
                     driver.phase = Phase::Finished;
                     Ok(false)
                 }
@@ -1481,13 +1576,15 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
                 emit(
                     "full_ui_flows_verified repeat_cycles=3 document_flows=8 table_cases=8 resource_cases=9 idle_seconds=5 same_process=true",
                 );
-                // 原前台已为空且原 Launcher 弱证据已归还；正式显示新 Launcher，再经原目录激活。
-                // 不在这里直接创建 Markdown 会话或更改输入法，也不嵌套另一事件循环。
+                // Original foreground and launcher weak evidence ended. Show a new production launcher and
+                // reactivate through its catalog, without direct Markdown construction, input switching or a nested loop.
                 resume_launcher_after_release()?;
             } else {
+                // Stop only after this workload's final idle; the outer owner still verifies empty resources and reaps the process.
                 stop_loop();
             }
         }
+        // An unrequested stage/phase pair cannot advance a different workflow or be counted as completion.
         _ => return Err("整产品事件与当前阶段不一致".to_owned()),
     }
     emit(&format!(
@@ -1497,21 +1594,23 @@ fn operate(stage: Stage) -> Result<StageOutcome, String> {
     Ok(StageOutcome::Completed)
 }
 
-/// 正式应用启动回调只启动已安装的唯一验收driver，不另外建立产品启动路径。
+/// Start only the installed diagnostic driver from the real launch callback, without another product initialization path.
 pub(super) fn application_did_finish_launching(mtm: MainThreadMarker) {
     let start = DRIVER.with_borrow_mut(|slot| {
         let Some(driver) = slot.as_mut() else {
+            // Ordinary product launch has no diagnostic driver or synthetic foreground work.
             return false;
         };
         if driver.phase != Phase::WaitingLaunch {
-            return false; // 重复启动通知不重开样本或另建driver。
+            // Duplicate launch notifications cannot reopen fixtures or construct another driver.
+            return false;
         }
         driver.phase = Phase::LauncherReady;
         true
     });
     if start {
         if !super::shortcuts::product_probe_registration_active() {
-            // 热键冲突或配置失败必须保留为失败，不能换备用键掩盖真实产品注册和驻留成本。
+            // Preserve real shortcut conflict/settings failure without a fallback key hiding product registration or resident cost.
             fail("真实产品启动未取得唯一已配置热键".to_owned());
             return;
         }
@@ -1522,7 +1621,7 @@ pub(super) fn application_did_finish_launching(mtm: MainThreadMarker) {
     }
 }
 
-/// 呈现回调只固定原图观察身份；show栈的临时Native所有权尚未归还时，不据此推定就绪或关闭。
+/// Capture original graph identity at presentation without inferring readiness or close while show still owns temporary claims.
 pub(super) fn launcher_presented(identity: LauncherProbeIdentity) {
     let claim = DRIVER.with_borrow(|slot| {
         let driver = slot.as_ref()?;
@@ -1530,22 +1629,24 @@ pub(super) fn launcher_presented(identity: LauncherProbeIdentity) {
             driver.phase,
             Phase::LauncherReady | Phase::VerifyPluginRelease
         ) {
-            // 插件其它阶段或停止后的show没有创建新验收等待的权限。
+            // Other plugin phases and stopped drivers cannot acquire a new diagnostic readiness wait.
             return None;
         }
         Some((driver.epoch, driver.launcher_readiness.is_some()))
     });
     let Some((epoch, already_captured)) = claim else {
+        // A presentation outside the admitted phase cannot replace the original observation identity.
         return;
     };
     if !already_captured {
-        // 原show返回时只绑定一次身份锚点；后继通知、重复呈现及getter都不能替换这份原图证据。
+        // Bind identity once when original show returns; later notifications, repeated presentation and getters cannot replace it.
         let wait = Rc::new(LauncherReadinessWait::new(
             epoch,
             super::launcher_close::probe_generation(),
             identity,
         ));
         if !wait.matches_active_owner() {
+            // Identity lost during weak capture is failure, never a reason to adopt the latest active panel.
             fail("Launcher 呈现结束时原弱身份已经失效".to_owned());
             return;
         }
@@ -1554,7 +1655,7 @@ pub(super) fn launcher_presented(identity: LauncherProbeIdentity) {
                 && driver.epoch == epoch
                 && driver.launcher_readiness.is_none()
             {
-                // Native弱加载已经返回；借用内只移交弱元数据，不调用可能重入的Native操作。
+                // Native weak loads have returned; transfer weak metadata only, with no reentrant native calls under the borrow.
                 driver.launcher_readiness = Some(wait);
             }
         });
@@ -1562,7 +1663,7 @@ pub(super) fn launcher_presented(identity: LauncherProbeIdentity) {
     queue_launcher_readiness_check(epoch);
 }
 
-/// 只复制当前原等待的Rc；该对象仅保弱证据，不增加Native、正文或SDK会话所有权。
+/// Copy only the current wait's Rc, whose weak metadata adds no native, document or SDK-session ownership.
 fn launcher_readiness_wait() -> Option<Rc<LauncherReadinessWait>> {
     DRIVER.with_borrow(|slot| {
         let driver = slot.as_ref()?;
@@ -1574,7 +1675,7 @@ fn launcher_readiness_wait() -> Option<Rc<LauncherReadinessWait>> {
     })
 }
 
-/// 同一排队观察合并真实通知；Pending没有新通知时不调用此入口自发重试。
+/// Coalesce real signals into one queued check; Pending without a new notification never retries through this entry.
 fn queue_launcher_readiness_check(epoch: u64) {
     let queue = DRIVER.with_borrow_mut(|slot| {
         slot.as_mut().is_some_and(|driver| {
@@ -1586,37 +1687,40 @@ fn queue_launcher_readiness_check(epoch: u64) {
         })
     });
     if queue && let Err(error) = enqueue(Stage::LauncherReady) {
-        // 后继事件创建失败就固定失败，不能遗留已经登记却永远无法交付的观察权限。
+        // Successor-event creation failure stays explicit instead of leaving reserved observation authority undeliverable.
         fail(error);
     }
 }
 
-/// 应用激活通知只授权观察一次；非激活式面板仍须满足正式就绪条件，不能仅凭通知名称通过。
+/// Activation notification authorizes one observation; the nonactivating panel still must satisfy actual readiness facts.
 pub(super) fn application_did_become_active(notification: &NSNotification, mtm: MainThreadMarker) {
     let Some(wait) = launcher_readiness_wait() else {
-        return; // 原show身份尚未固定，提前通知不能凭空建立观察权限。
+        // An early notification cannot create readiness authority before original show identity is captured.
+        return;
     };
     let Some(object) = notification.object() else {
-        return; // 缺少发送对象的通知不能证明当前应用真正被激活。
+        // A sender-less notification cannot establish that this application actually activated.
+        return;
     };
     let app = NSApplication::sharedApplication(mtm);
     let expected: &objc2::runtime::AnyObject = &app;
     if std::ptr::eq(expected, &*object) {
-        // getter和通知临时持有只留在本回调栈内；队列中只放一个有限标量后继事件。
+        // Native getter/notification claims stay on this stack; queue only one bounded scalar successor event.
         queue_launcher_readiness_check(wait.epoch);
     }
 }
 
-/// key通知必须指向本轮原面板；其它窗口的通知不能推进当前验收。
+/// Require a key notification from this round's original panel, excluding every other window's transition.
 pub(super) fn launcher_did_become_key(notification: &NSNotification) {
     if let Some(wait) = launcher_readiness_wait()
         && wait.matches_panel_notification(notification)
     {
+        // Only the matched original weak panel identity may signal another readiness observation.
         queue_launcher_readiness_check(wait.epoch);
     }
 }
 
-/// 实际开始编辑通知补足key通知早于field editor安装的合法顺序，仍只观察原输入对象。
+/// Handle editing-begin after an earlier key notification by observing only the original input's actual field editor.
 pub(super) fn launcher_did_begin_editing(notification: &NSNotification) {
     if let Some(wait) = launcher_readiness_wait()
         && wait.matches_input_notification(notification)
@@ -1625,7 +1729,7 @@ pub(super) fn launcher_did_begin_editing(notification: &NSNotification) {
     }
 }
 
-/// 只接纳原Launcher关闭屏障的精确代次，再独立核验该图真实弱证据，不用收据代替资源归还。
+/// Accept the exact original launcher barrier generation, then independently verify weak graph release instead of trusting the receipt alone.
 pub(super) fn launcher_released(generation: u64) {
     let observation = DRIVER.with_borrow(|slot| {
         let driver = slot.as_ref()?;
@@ -1639,35 +1743,41 @@ pub(super) fn launcher_released(generation: u64) {
                 driver.first_failure.is_some(),
                 driver.epoch,
             )),
-            _ => None, // 其它验收的关闭或上一轮迟到回执都不能授权激活本轮插件。
+            // Another diagnostic close or prior round's late receipt cannot authorize this plugin activation.
+            _ => None,
         }
     });
     let Some((release, final_close, failed, epoch)) = observation else {
+        // Unmatched callbacks have no observation or successor authority to consume.
         return;
     };
     let released = autoreleasepool(|_| release.is_some_and(|release| release.is_released()));
     if !released || !foreground_is_empty() {
         fail("Launcher 原图弱证据与真实 Host 释放收据不一致".to_owned());
-        // 原唯一关闭回执已经到达；证据不符必须结束失败，不能再等不存在的第二份回执。
+        // The sole original receipt already arrived; mismatched evidence fails now instead of waiting for an impossible second receipt.
         stop_loop();
         return;
     }
     let old_release = DRIVER.with_borrow_mut(|slot| {
         if let Some(driver) = slot.as_mut() {
             driver.phase = if final_close {
+                // The final original close starts idle only after actual launcher graph verification.
                 Phase::Idle
             } else {
+                // Ordinary cycles may activate the next plugin only after this release boundary.
                 Phase::ActivatePlugin
             };
             driver.launcher_release.take()
         } else {
-            None // driver已经不存在，没有可转移的原图弱元数据。
+            // An ended driver owns no original weak metadata to transfer.
+            None
         }
     });
-    drop(old_release); // 最后一份Objective-C弱引用也在DRIVER借用外归还，避免析构重入仍被借用的状态。
+    // End even the last Objective-C weak reference outside DRIVER borrowing, avoiding destructor reentry into borrowed state.
+    drop(old_release);
     emit("launcher_released native_weak_empty=true host_barrier_consumed=true");
     if failed {
-        // 失败后的正常清理仍是失败；无需再延长成功场景的驻留采样窗口。
+        // Successful cleanup after failure remains a failed workload and needs no extra successful-idle observation interval.
         DRIVER.with_borrow_mut(|slot| {
             if let Some(driver) = slot.as_mut() {
                 driver.phase = Phase::Finished;
@@ -1675,6 +1785,7 @@ pub(super) fn launcher_released(generation: u64) {
         });
         stop_loop();
     } else if final_close {
+        // This one-shot timer measures already-empty resident time; it does not poll native release.
         emit("resident_idle_begin seconds=5 foreground_empty=true");
         let deadline = dispatch2::DispatchTime::try_from(Duration::from_secs(IDLE_SECONDS));
         let scheduled = deadline
@@ -1688,21 +1799,23 @@ pub(super) fn launcher_released(generation: u64) {
                             })
                         });
                         if current && let Err(error) = enqueue(Stage::FinishIdle) {
+                            // A stale driver timer stays inert; a current driver's failed event creation must remain failure.
                             fail(error);
                         }
                     })
                     .map_err(|_| "驻留测量结束事件无法调度".to_owned())
             });
-        // 一次性时长只延长资源已释放后的驻留采样，不轮询或重试任何释放条件。
+        // The one-shot duration extends observation after resources released, without polling or retrying release conditions.
         if let Err(error) = scheduled {
             fail(error);
         }
     } else if let Err(error) = enqueue(Stage::ActivatePlugin) {
+        // Failure to queue the next admitted cycle cannot be replaced by immediate activation on this native callback stack.
         fail(error);
     }
 }
 
-/// 匹配的finish_close、SDK会话Drop及Host屏障消费完成后，才记录本次真实前台返回回执。
+/// Record this foreground receipt only after matching finish_close, SDK-session Drop and Host-barrier consumption.
 pub(super) fn plugin_released(
     generation: u64,
     target: PluginCommandTarget,
@@ -1715,12 +1828,15 @@ pub(super) fn plugin_released(
             request: expected,
         } = driver.phase
         else {
+            // A receipt outside this driver's original release phase grants no next-step authority.
             return None;
         };
         if generation != expected_generation || driver.target != Some(target) {
-            return None; // 旧代次、其它目标或无关会话的回执都不能推进当前轮次。
+            // Old generations, other targets and unrelated sessions cannot advance this round.
+            return None;
         }
         if request != expected {
+            // Keep the exact intent and scope; a terminal receipt cannot stand in for ordinary plugin return.
             return Some(Err("整产品返回收到错误关闭意图或终止范围".to_owned()));
         }
         driver.phase = Phase::VerifyPluginRelease;
@@ -1737,16 +1853,18 @@ pub(super) fn plugin_released(
     }
 }
 
-/// 保留首个失败，沿原插件返回与Launcher关闭路径清理，不以退出应用替代插件自身释放。
+/// Preserve the first failure and clean through original plugin return/launcher close, without substituting process exit for release.
 fn fail(error: String) {
     let first = DRIVER.with_borrow_mut(|slot| {
         let driver = slot.as_mut()?;
         if driver.phase == Phase::Finished || driver.first_failure.is_some() {
-            return None; // 清理重入不能重复发起关闭，也不能覆盖已经保存的首个失败原因。
+            // Cleanup reentry cannot issue another close or replace the already-recorded first cause.
+            return None;
         }
         driver.first_failure = Some(error);
         driver.pending = None;
-        driver.step_terminal = None; // 清理可能取消原请求；先撤销旧核验的排队权限，防止取消回调继续推进成功流程。
+        // Cleanup may cancel original work; revoke its queued verification before cancellation callbacks can advance success.
+        driver.step_terminal = None;
         Some((
             driver.phase,
             driver.hosted.as_ref().map(Rc::clone),
@@ -1758,6 +1876,7 @@ fn fail(error: String) {
     });
     let Some((phase, bridge, expected_target, resource_bridge, table_bridge, ime_bridge)) = first
     else {
+        // An absent or already-failed driver adds no second teardown transaction.
         return;
     };
     emit("failed acceptance=false");
@@ -1773,32 +1892,39 @@ fn fail(error: String) {
             Phase::PluginRelease { .. } => super::plugin_host::product_probe_accepted_close().map(
                 |(generation, target, request)| AcceptedClose::Plugin(generation, target, request),
             ),
-            _ => None, // 上方已限定关闭阶段；其它类型不取得额外关闭权限。
+            // The enclosing branch admits close phases only; other phases acquire no extra close authority.
+            _ => None,
         };
         if !matches_accepted_close(phase, expected_target, accepted) {
-            // 关闭或保存预检被拒绝就不会产生后继释放回执；直接保留失败，不重放关闭或伪报释放。
+            // Refused close/save preflight produces no later release receipt; preserve failure without replay or a false release claim.
             stop_loop();
         }
-        // 仅为真实接纳且身份匹配的原关闭等待回执；缺失信号仍由父进程期限判失败。
+        // Wait only for an actually accepted, identity-matched original close; the parent deadline still rejects missing delivery.
         return;
     }
     if let Some(probe) = resource_bridge {
+        // Resource cleanup uses its original probe and declared close direction, never another live session's controls.
         let intent = if resource_case() == Some(NativeMarkdownHostedResourceCase::UnsubmittedSearch)
         {
+            // The unsubmitted-search scenario preserves its original return-to-launcher cleanup interaction.
             PluginCloseIntent::ExitToLauncher
         } else {
+            // Other resource cases preserve dismissal/resume while the original failing result remains recorded.
             PluginCloseIntent::DismissAndResume
         };
         if begin_plugin_close_observation(intent).is_ok() && probe.request_close().is_ok() {
-            return; // 清理只等待真正被本次宿主接纳的原关闭，不能把低内存或清理成功当业务通过。
+            // Await only this Host-admitted close; low memory or successful cleanup cannot make the workload pass.
+            return;
         }
     } else if let Some(probe) = table_bridge {
         if begin_plugin_close_observation(PluginCloseIntent::ExitToLauncher).is_ok()
             && probe.request_return(true).is_ok()
         {
-            return; // 只清理本次原表格会话，成功计数不随清理增加。
+            // Clean only this original table session without increasing any successful-case count.
+            return;
         }
     } else if let Some(probe) = ime_bridge {
+        // Use the original IME session's normal return without changing the active input source.
         if begin_plugin_close_observation(PluginCloseIntent::ExitToLauncher).is_ok()
             && probe.request_return().is_ok()
         {
@@ -1808,12 +1934,15 @@ fn fail(error: String) {
         let requested = begin_plugin_close_observation(PluginCloseIntent::ExitToLauncher)
             .and_then(|_| bridge.request_return());
         if requested.is_ok() {
-            return; // 原释放回调到达后还须核验Native弱证据，随后才能关闭返回的Launcher。
+            // The original release callback must still verify native weak evidence before closing the returned launcher.
+            return;
         }
     } else if expected_target.is_some() {
-        // 首帧/路径核验可能在桥创建前失败。原激活代次仍相同才允许直接由生产 Host 结束会话；
-        // 此分支没有 MD 弱票，后继只作失败清理，不能靠进程退出或新造观察桥补成功。
+        // First-frame/path verification may fail before bridge construction. Close through production Host
+        // only while the original activation generation remains current. With no Markdown weak proof,
+        // the successor is failure cleanup only; process exit or a new observer cannot invent acceptance.
         if begin_plugin_close_observation(PluginCloseIntent::DismissAndResume).is_err() {
+            // Lost original session authority forbids closing a successor, so stop with the first failure intact.
             stop_loop();
             return;
         }
@@ -1826,19 +1955,22 @@ fn fail(error: String) {
             || closing_phase
                 .is_some_and(|phase| matches_accepted_close(phase, expected_target, accepted))
         {
-            return; // 请求同步或异步接纳都只等原真实 lifecycle，不重试失败保存。
+            // Both synchronous and asynchronous admission await the original real lifecycle without retrying failed saves.
+            return;
         }
     }
     if super::ACTIVE_SURFACE.with_borrow(Option::is_some) && close_launcher(true).is_ok() {
-        return; // 清理同样等待真实前台关闭回执；close返回不等于资源已经释放。
+        // Cleanup still waits for the actual foreground receipt; close returning alone proves no resource release.
+        return;
     }
-    // 原桥缺失或关闭被拒绝就停止并保留失败，不清空生产owner来伪造资源释放。
+    // A missing bridge or refused close stops with failure; clearing production owner slots would fabricate release.
     stop_loop();
 }
 
-/// stop之后只投递唤醒事件使nextEvent返回，不合成输入，也不借菜单Quit改变产品关闭语义。
+/// Wake nextEvent after stop with a non-input event, without synthesizing input or changing close semantics through menu Quit.
 fn stop_loop() {
     let Some(mtm) = MainThreadMarker::new() else {
+        // A worker cannot access AppKit or pretend its own TLS describes the main thread's event loop.
         return;
     };
     let app = NSApplication::sharedApplication(mtm);
@@ -1847,43 +1979,48 @@ fn stop_loop() {
         NSEventType::ApplicationDefined, NSPoint::new(0.0, 0.0), NSEventModifierFlags::empty(), 0.0, 0, None,
         0, 0, 0,
     ) {
+        // This unowned wake event carries no diagnostic stage, input action or foreground mutation authority.
         app.postEvent_atStart(&event, true);
     }
 }
 
-/// 在父进程提供的新空目录内执行三轮完整长文、巨段落和四种源模式，以及独立资源场景，随后采样5秒空前台驻留。
-/// 调用方明确提供已经核验的现用快捷键；只写合成配置，不选备用键或修改用户设置。
+/// Run repeated full long-document flows, a giant paragraph, source modes and independent resource cases
+/// in a new empty parent-owned directory, then observe five seconds of empty-foreground residency.
+/// The caller supplies its verified existing summon binding; only synthetic settings are written.
 ///
-/// 每轮编辑成功须核完整Unicode替换、撤销重做、原文恢复及真实保存；资源场景另核实际释放。
-/// 本入口不证明物理输入、最终呈现或整产品内存达标；进程归属、采样和退出仍由父进程独立核验。
-/// 文件创建与删除仅限该新目录中本入口拥有的合成样本，不触碰用户文稿。
+/// Editing success requires exact Unicode replacement, undo/redo, original-text restoration and real save.
+/// Resource cases separately verify release. This entry proves neither physical input, presentation nor
+/// the product memory budget; the parent independently verifies process attribution, sampling and exit.
+/// All fixture writes/deletions remain inside this new exclusive directory, without touching user documents.
 ///
 /// # Errors
 ///
-/// 非主线程、已有前台、目录非空及Native、步骤、保存、释放错误均明确失败，清理不抹掉首错。
+/// Reject foreign threads, existing foreground owners, nonempty directories and native/step/save/release failures.
+/// Cleanup preserves the first concrete failure rather than turning resource release into functional success.
 pub fn run_native_product_acceptance(root: &Path, shortcut: &str) -> Result<(), String> {
     run_product(root, shortcut, Workload::Full)
 }
 
-/// 真实中文候选专项仍沿正式组合根运行；不得嵌套事件循环或复用本人正在编辑的输入客户。
+/// Exercise real Chinese candidates through the existing composition root, without a nested loop or reusing personal input clients.
 pub fn run_native_product_ime_acceptance(root: &Path, shortcut: &str) -> Result<(), String> {
     run_product(root, shortcut, Workload::SystemIme)
 }
 
-/// 在同一 Driver、夹具和进程中完整执行原编辑流程与中文候选专项，不创建外部浏览器页面。
-/// 外链有独立真实交付边界；此入口的成功不能替代 CompleteUi 的 HTTP 门。
+/// Run original editing and Chinese-candidate flows in one driver, fixture and process without a new browser page.
+/// External links have a separate real delivery boundary; this entry cannot replace CompleteUi's HTTP gate.
 ///
 /// # Errors
-/// 原功能、保存、系统输入、资源归还或两段驻留任一失败，均保留原首错。
+/// Preserve the original first failure from functionality, save, system input, resource release or either idle endpoint.
 pub fn run_native_product_core_ui_acceptance(root: &Path, shortcut: &str) -> Result<(), String> {
     run_product(root, shortcut, Workload::CoreUi)
 }
 
-/// 完整 UI 在同 PID 先执行原全部流程与五秒驻留，再执行真实中文八步和最终五秒驻留。
-/// 两段复用原应用组合根和独占夹具；不能把独立运行的最低峰值拼成整产品通过。
+/// Run every original flow and five-second idle, then eight real Chinese-input steps and final idle in the same PID.
+/// Both phases share the original application composition and exclusive fixture; independent low peaks cannot
+/// be combined into a passed whole-product memory result.
 ///
 /// # Errors
-/// 任一原功能、保存、系统输入、资源归还或驻留终点失败，均按同一 Driver 保留原首错。
+/// The same driver preserves the first functional, save, system-input, resource or idle-endpoint failure.
 pub fn run_native_product_complete_ui_acceptance(
     root: &Path,
     shortcut: &str,
@@ -1891,12 +2028,13 @@ pub fn run_native_product_complete_ui_acceptance(
     run_product(root, shortcut, Workload::CompleteUi)
 }
 
-/// 独立与串接验收共用唯一装配和资源收尾；独立对照保持原步骤，串接不重复启动应用。
+/// Share one composition and cleanup path across standalone/combined workloads without starting another application loop.
 fn run_product(root: &Path, shortcut: &str, workload: Workload) -> Result<(), String> {
     let configured_shortcut = ShortcutBinding::parse(shortcut)
         .map_err(|_| "整产品验收必须使用明确有效的既有启动器快捷键".to_owned())?;
     MainThreadMarker::new().ok_or("整产品验收需要真实 AppKit 主线程")?;
     if DRIVER.with_borrow(Option::is_some) || !foreground_is_empty() {
+        // Another driver or live foreground graph cannot lend its state, documents or close authority to this run.
         return Err("整产品验收需要全新空前台进程".to_owned());
     }
     if !root.is_absolute()
@@ -1907,16 +2045,17 @@ fn run_product(root: &Path, shortcut: &str, workload: Workload) -> Result<(), St
             .next()
             .is_some()
     {
-        // 只初始化明确指定的新空目录；已有内容不属于本入口，不能删除或改写以满足验收前提。
+        // Initialize only the declared new empty root; existing contents cannot be removed or rewritten to satisfy this precondition.
         return Err("整产品验收目录必须是绝对路径的新空目录".to_owned());
     }
     let _pasteboard = super::acceptance_fixture::install_fixture(root)?;
     let fixture = FixtureScope;
-    // 隔离样本没有用户配置，默认键可能冲突；复制调用方已核验的现用绑定，由正式启动流程注册一次。
+    // Synthetic settings have no user choice and the default may conflict. Persist the caller's verified
+    // existing binding here, letting original production startup perform its sole registration.
     ShortcutSettingsStore::new(root.join("application-support"))
         .persist(configured_shortcut)
         .map_err(|_| "无法为合成验收持久化明确的既有快捷键".to_owned())?;
-    // 只移除夹具刚创建的两个输入样本；随后保唯一长笔记，使选择不依赖目录枚举顺序。
+    // Remove only the two files this fixture just created; one later long note avoids filesystem-order-dependent selection.
     for name in ["Acceptance.md", "SourcePerformance.md"] {
         std::fs::remove_file(root.join("workspace").join(name))
             .map_err(|_| "移除本工具短样本失败")?;
@@ -1927,17 +2066,19 @@ fn run_product(root: &Path, shortcut: &str, workload: Workload) -> Result<(), St
         .filter(|value| *value <= isize::MAX as u64)
         .ok_or("整产品验收代际耗尽")?;
     NEXT_EPOCH.set(epoch);
-    // SAFETY: 按NSApplication公开返回ABI接收单例消息；已存在的其它应用对象也满足该ABI及+1持有合同。
-    // 随后独立动态转换核验实际事件路由类型，不把父类对象假定成本入口的子类。
+    // SAFETY: receive sharedApplication using NSApplication's public return ABI and +1 retained binding contract.
+    // A later dynamic cast independently checks the routing subclass instead of assuming an existing base object has that type.
     let app: Retained<NSApplication> =
         unsafe { msg_send![ProductAcceptanceApplication::class(), sharedApplication] };
     let app = app
         .downcast::<ProductAcceptanceApplication>()
         .map_err(|_| "整产品验收需要首次创建自己的应用事件路由".to_owned())?;
     if app.isRunning() {
+        // A live application loop cannot be nested or inherited as if this run owned its full initialization and lifetime.
         return Err("整产品验收不能嵌套已有应用事件循环".to_owned());
     }
     DRIVER.with_borrow_mut(|slot| {
+        // Publish the complete synthetic metadata once after all fallible acquisition and before production startup callbacks.
         *slot = Some(Driver {
             epoch,
             root: root.to_owned(),
@@ -1968,6 +2109,7 @@ fn run_product(root: &Path, shortcut: &str, workload: Workload) -> Result<(), St
         });
     });
     match workload {
+        // Each receipt declares its own limits; none claims physical keyboard input or a measured memory budget.
         Workload::SystemIme => emit(
             "configured workload=system_ime actual_input_source=true input_source_selected=false physical_keyboard=false memory_budget_pass=unmeasured",
         ),
@@ -1982,7 +2124,8 @@ fn run_product(root: &Path, shortcut: &str, workload: Workload) -> Result<(), St
         ),
     }
     let result = super::run_application();
-    // 正式run_application在停止时注销热键；仍独立核验实际空前台和注册已归还，不从代码路径推定释放。
+    // Production run_application unregisters on stop, but independently inspect empty foreground and registration
+    // authority instead of inferring release from having executed that code path.
     let released = foreground_is_empty() && super::shortcuts::product_probe_registration_released();
     drop(fixture);
     let mut state = DRIVER.take().ok_or("整产品 driver 提前丢失")?;
@@ -1990,9 +2133,10 @@ fn run_product(root: &Path, shortcut: &str, workload: Workload) -> Result<(), St
         .external_http
         .take()
         .map_or(Ok(()), |mut server| server.shutdown());
-    // 任一普通错误也显式结束唯一网络owner；保持原首错，不能用资源归还洗白功能失败。
+    // Every ordinary error still ends the sole network owner; resource cleanup never erases a failed functional outcome.
     let failure = result.err().or_else(|| state.first_failure.take());
     match (failure, http_cleanup) {
+        // Keep functional and cleanup causes independent, including after a partially acquired HTTP listener.
         (Some(primary), Err(cleanup)) => return Err(format!("{primary}；HTTP释放失败：{cleanup}")),
         (Some(primary), Ok(())) => return Err(primary),
         (None, Err(cleanup)) => return Err(cleanup),
@@ -2002,10 +2146,11 @@ fn run_product(root: &Path, shortcut: &str, workload: Workload) -> Result<(), St
         Workload::SystemIme => state.ime_verified,
         Workload::Full => state.full_workload_verified(),
         Workload::CoreUi => {
-            // 完整性沿用各原步骤的真实终点；未执行真实HTTP交付时明确只证明编辑与输入部分。
+            // Require every original editing/input endpoint and both idles; without actual HTTP this proves no external handoff.
             state.full_workload_verified() && state.full_idle_verified && state.ime_verified
         }
         Workload::CompleteUi => {
+            // Complete UI additionally needs the actual network terminal receipt, not just correct document/source state.
             state.full_workload_verified()
                 && state.full_idle_verified
                 && state.ime_verified
@@ -2022,9 +2167,11 @@ fn run_product(root: &Path, shortcut: &str, workload: Workload) -> Result<(), St
         || state.step_terminal.is_some()
         || state.external_http.is_some()
     {
+        // Functional results, final stage and all session/observer/registration owners must jointly finish before a receipt is printed.
         return Err("整产品循环缺失终点、真实前台释放或热键注销证据".to_owned());
     }
     match workload {
+        // Final receipts report only this original workload's verified scope; the parent owns RSS and process-exit checks.
         Workload::SystemIme => println!(
             "product_acceptance event=system_ime_finished actual_han=true visible_candidate_near_caret=true undo_redo_restore=true saved=true viewport_lazy=true foreground_empty=true sdk_session_owned=false global_key_owner_released=true fixture_cleared=true physical_keyboard=false memory_budget_pass=unmeasured"
         ),
