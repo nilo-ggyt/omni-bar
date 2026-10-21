@@ -188,7 +188,7 @@ dependencies = [
 [[package]]
 name = "harfrust"
 version = "0.14.0"
-source = "git+https://github.com/nilo-ggyt/omni-md.git?rev=5ba261979420b9a95fbaf30b3d0e46c1de0040bf#5ba261979420b9a95fbaf30b3d0e46c1de0040bf"
+source = "git+https://github.com/nilo-ggyt/omni-md.git?rev=2c512f9baf08df6ec5e175cdaa94aed891bb08ef#2c512f9baf08df6ec5e175cdaa94aed891bb08ef"
 dependencies = [
  "bitflags",
  "bytemuck",
@@ -353,7 +353,7 @@ version = "0.1.0"
 [[package]]
 name = "omni-markdown-core"
 version = "0.1.0"
-source = "git+https://github.com/nilo-ggyt/omni-md.git?rev=5ba261979420b9a95fbaf30b3d0e46c1de0040bf#5ba261979420b9a95fbaf30b3d0e46c1de0040bf"
+source = "git+https://github.com/nilo-ggyt/omni-md.git?rev=2c512f9baf08df6ec5e175cdaa94aed891bb08ef#2c512f9baf08df6ec5e175cdaa94aed891bb08ef"
 dependencies = [
  "harfrust",
  "libc",
@@ -373,7 +373,7 @@ dependencies = [
 [[package]]
 name = "omni-md-plugin"
 version = "0.1.0"
-source = "git+https://github.com/nilo-ggyt/omni-md.git?rev=5ba261979420b9a95fbaf30b3d0e46c1de0040bf#5ba261979420b9a95fbaf30b3d0e46c1de0040bf"
+source = "git+https://github.com/nilo-ggyt/omni-md.git?rev=2c512f9baf08df6ec5e175cdaa94aed891bb08ef#2c512f9baf08df6ec5e175cdaa94aed891bb08ef"
 dependencies = [
  "block2",
  "core-foundation",
@@ -440,7 +440,7 @@ dependencies = [
 [[package]]
 name = "pulldown-cmark"
 version = "0.13.4"
-source = "git+https://github.com/nilo-ggyt/omni-md.git?rev=5ba261979420b9a95fbaf30b3d0e46c1de0040bf#5ba261979420b9a95fbaf30b3d0e46c1de0040bf"
+source = "git+https://github.com/nilo-ggyt/omni-md.git?rev=2c512f9baf08df6ec5e175cdaa94aed891bb08ef#2c512f9baf08df6ec5e175cdaa94aed891bb08ef"
 dependencies = [
  "bitflags",
  "memchr",
